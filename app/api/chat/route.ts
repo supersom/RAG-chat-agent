@@ -211,7 +211,7 @@ export async function POST(req: Request) {
       ...messages.map((msg: any) => ({ role: msg.role, content: msg.content })),
     ];
 
-    const response = await completion({
+    const response = await (completion as any)({
       model: model,
       max_tokens: 1000,
       messages: litellmMessages,
