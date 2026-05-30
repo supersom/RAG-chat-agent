@@ -65,8 +65,6 @@ export async function POST(req: Request) {
   const { messages, model, knowledgeBaseId } = await req.json();
   const latestMessage = messages[messages.length - 1].content;
 
-  console.log("🔐 Runtime env check - OPENAI_API_KEY:", process.env.OPENAI_API_KEY?.slice(0, 8) ?? "MISSING");
-  console.log("🔐 Runtime env check - BAWS_ACCESS_KEY_ID:", process.env.BAWS_ACCESS_KEY_ID?.slice(0, 8) ?? "MISSING");
   console.log("📝 Latest Query:", latestMessage);
   measureTime("User Input Received");
 
