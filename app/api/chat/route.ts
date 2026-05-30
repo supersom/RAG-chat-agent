@@ -211,12 +211,18 @@ export async function POST(req: Request) {
       ...messages.map((msg: any) => ({ role: msg.role, content: msg.content })),
     ];
 
+    const apiKey =
+      process.env.OPENAI_API_KEY ||
+      process.env.ANTHROPIC_API_KEY ||
+      process.env.OPENROUTER_API_KEY;
+
     const response = await (completion as any)({
       model: model,
       max_tokens: 1000,
       messages: litellmMessages,
       temperature: 0.3,
       response_format: { type: "json_object" },
+      api_key: apiKey,
     });
 
     measureTime("Claude Generation Complete");
