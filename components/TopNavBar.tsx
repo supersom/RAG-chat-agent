@@ -3,6 +3,7 @@ import React, { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import Link from "next/link";
 import { Moon, Sun, Check } from "lucide-react";
+import SettingsModal from "@/components/SettingsModal";
 import { useTheme } from "next-themes";
 import { themes } from "@/styles/themes";
 import {
@@ -92,6 +93,7 @@ const TopNavBar = () => {
         </span>
       </div>
       <div className="flex items-center gap-2">
+        <SettingsModal />
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="outline">

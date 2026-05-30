@@ -21,6 +21,7 @@ export async function retrieveContext(
   query: string,
   knowledgeBaseId: string,
   n: number = 3,
+  credentials?: { accessKeyId?: string; secretAccessKey?: string },
 ): Promise<{
   context: string;
   isRagWorking: boolean;
@@ -29,8 +30,8 @@ export async function retrieveContext(
   const bedrockClient = new BedrockAgentRuntimeClient({
     region: "us-east-2",
     credentials: {
-      accessKeyId: process.env.BAWS_ACCESS_KEY_ID!,
-      secretAccessKey: process.env.BAWS_SECRET_ACCESS_KEY!,
+      accessKeyId: (credentials?.accessKeyId || process.env.BAWS_ACCESS_KEY_ID)!,
+      secretAccessKey: (credentials?.secretAccessKey || process.env.BAWS_SECRET_ACCESS_KEY)!,
     },
   });
 

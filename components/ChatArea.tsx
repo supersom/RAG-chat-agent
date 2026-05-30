@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import config from "@/config";
+import { loadSettings } from "@/components/SettingsModal";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import ReactMarkdown from "react-markdown";
@@ -288,7 +289,10 @@ function ChatArea() {
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [showHeader, setShowHeader] = useState(false);
-  const models: Model[] = (process.env.NEXT_PUBLIC_MODELS || "claude-haiku-4-5-20251001:Claude Haiku 4.5")
+
+  const uiSettings = loadSettings();
+  const modelsSource = uiSettings.models || process.env.NEXT_PUBLIC_MODELS || "claude-haiku-4-5-20251001:Claude Haiku 4.5";
+  const models: Model[] = modelsSource
     .split(",")
     .map((entry) => {
       const [id, ...nameParts] = entry.trim().split(":");
@@ -299,12 +303,11 @@ function ChatArea() {
   const [showAvatar, setShowAvatar] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const [selectedKnowledgeBase, setSelectedKnowledgeBase] = useState(
-    process.env.NEXT_PUBLIC_KNOWLEDGE_BASE_ID || "your-knowledge-base-id",
-  );
+  const defaultKbId = uiSettings.knowledgeBaseId || process.env.NEXT_PUBLIC_KNOWLEDGE_BASE_ID || "";
+  const [selectedKnowledgeBase, setSelectedKnowledgeBase] = useState(defaultKbId);
 
   const knowledgeBases: KnowledgeBase[] = [
-    { id: process.env.NEXT_PUBLIC_KNOWLEDGE_BASE_ID || "your-knowledge-base-id", name: "Som's KB" },
+    { id: defaultKbId, name: "Som's KB" },
   ];
 
   const scrollToBottom = () => {
@@ -437,6 +440,9 @@ function ChatArea() {
           messages: [...messages, userMessage],
           model: selectedModel,
           knowledgeBaseId: selectedKnowledgeBase,
+          llmApiKey: uiSettings.llmApiKey || undefined,
+          bawsAccessKeyId: uiSettings.bawsAccessKeyId || undefined,
+          bawsSecretAccessKey: uiSettings.bawsSecretAccessKey || undefined,
         }),
       });
 
