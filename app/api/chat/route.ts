@@ -1,4 +1,3 @@
-import { completion } from "litellm";
 import { z } from "zod";
 import { retrieveContext, RAGSource } from "@/app/lib/utils";
 import crypto from "crypto";
@@ -210,6 +209,8 @@ export async function POST(req: Request) {
       { role: "system", content: systemPrompt },
       ...messages.map((msg: any) => ({ role: msg.role, content: msg.content })),
     ];
+
+    const { completion } = await import("litellm");
 
     const response = await (completion as any)({
       model: model,
