@@ -1,11 +1,11 @@
-# Claude Customer Support Agent
+# Knowledgebase Search Agent
 
-An advanced, fully customizable customer support chat interface powered by Claude and leveraging Amazon Bedrock Knowledge Bases for knowledge retrieval.
-![preview](tutorial/preview.png)
+An advanced, customizable chat interface powered by LiteLLM and leveraging Amazon Bedrock Knowledge Bases for knowledge retrieval.
+<!--![preview](tutorial/preview.png)-->
 
 ## Key Features
 
--  AI-powered chat using Anthropic's Claude model
+-  AI-powered chat using LiteLLM
 -  Amazon Bedrock integration for contextual knowledge retrieval
 -  Real-time thinking & debug information display
 -  Knowledge base source visualization
@@ -26,6 +26,8 @@ Create a `.env.local` file in the root directory with the following variables:
 
 ```
 ANTHROPIC_API_KEY=your_anthropic_api_key
+OPENAI_API_KEY=your_openai_api_key
+OPENROUTER_API_KEY=your_openrouter_api_key
 BAWS_ACCESS_KEY_ID=your_aws_access_key
 BAWS_SECRET_ACCESS_KEY=your_aws_secret_key
 ```
@@ -40,6 +42,22 @@ Note: We are adding a 'B' in front of the AWS environment variables for a reason
 2. Sign up or log in to your account
 3. Click on "Get API keys"
 4. Copy the key and paste it into your `.env.local` file
+
+### OpenAI API Key
+
+1. Visit [platform.openai.com](https://platform.openai.com/)
+2. Sign up or log in to your account
+3. Open the API keys section in your account dashboard
+4. Create a new secret key
+5. Copy the key and paste it into your `.env.local` file as `OPENAI_API_KEY`
+
+### OpenRouter API Key
+
+1. Visit [openrouter.ai](https://openrouter.ai/)
+2. Sign up or log in to your account
+3. Go to the Keys section of your dashboard
+4. Create a new API key
+5. Copy the key and paste it into your `.env.local` file as `OPENROUTER_API_KEY`
 
 ### AWS Access Key and Secret Key
 
@@ -64,7 +82,6 @@ Follow these steps to obtain your AWS credentials:
 8. Copy these keys and paste them into your `.env.local` file
 
 Note: Make sure to keep your keys secure and never share them publicly.
-
 
 ##  Amazon Bedrock RAG Integration
 
@@ -265,13 +282,3 @@ For production: Build with the desired script (e.g., npm run build:right)
 
 These scripts set the appropriate environment variables before running or building the application, allowing you to easily switch between different configurations.
 This flexibility allows you to tailor the application's layout to your specific needs, whether for testing, development, or production deployment.
-
-## Appendix
-
-This project is a prototype and is provided on an "as-is" basis. It is not intended for production use and may contain bugs, errors, or inconsistencies. By using this prototype, you acknowledge and agree that:
-- The software is provided in a pre-release, beta, or trial form.
-- It may not be suitable for production or mission-critical environments.
-- The developers are not responsible for any issues, data loss, or damages resulting from its use.
-- No warranties or guarantees of any kind are provided, either expressed or implied.
-- Support for this prototype may be limited or unavailable.
-- Use of this prototype is at your own risk. We encourage you to report any issues or provide feedback to help improve future versions.
