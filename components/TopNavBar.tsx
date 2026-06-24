@@ -1,7 +1,6 @@
 "use client";
 import React, { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
-import Link from "next/link";
 import { Moon, Sun, Check } from "lucide-react";
 import SettingsModal from "@/components/SettingsModal";
 import { useTheme } from "next-themes";
@@ -136,15 +135,6 @@ const TopNavBar = () => {
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
-        <Link
-          href="https://github.com/anthropics/anthropic-quickstarts"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Button variant="outline" className="text-foreground">
-            Deploy your own
-          </Button>
-        </Link>
       </div>
     </nav>
   );
