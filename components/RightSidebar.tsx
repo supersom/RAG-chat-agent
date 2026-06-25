@@ -54,10 +54,14 @@ const getLogColor = (message: string): string => {
   return "text-foreground";
 };
 
+const LAMBDA_NOISE = /^(START RequestId:|END RequestId:|REPORT RequestId:|Starting request using compute)/;
+const isAppLog = (message: string) => !LAMBDA_NOISE.test(message);
+
 const MAX_HISTORY = 15;
 const POLL_INTERVAL_MS = 5000;
 
 const RightSidebar: React.FC = () => {
+  const isDev = loadSettings().nodeEnv === "development";
   const [activeTab, setActiveTab] = useState<"kb" | "logs">("kb");
 
   // KB history state
@@ -124,7 +128,9 @@ const RightSidebar: React.FC = () => {
         if (data.error) {
           setLogsError(data.error);
         } else {
-          const newEvents: LogEvent[] = data.events ?? [];
+          const newEvents: LogEvent[] = (data.events ?? []).filter(
+            (e: LogEvent) => isAppLog(e.message ?? "")
+          );
           if (newEvents.length > 0) {
             const maxTs = Math.max(...newEvents.map((e) => e.timestamp ?? 0));
             lastTimestampRef.current = maxTs + 1;
@@ -177,16 +183,18 @@ const RightSidebar: React.FC = () => {
             >
               Knowledge Base
             </button>
-            <button
-              className={`text-sm font-medium pb-2 border-b-2 transition-colors ${
-                activeTab === "logs"
-                  ? "border-primary text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
-              }`}
-              onClick={() => setActiveTab("logs")}
-            >
-              CloudWatch Logs
-            </button>
+            {isDev && (
+              <button
+                className={`text-sm font-medium pb-2 border-b-2 transition-colors ${
+                  activeTab === "logs"
+                    ? "border-primary text-foreground"
+                    : "border-transparent text-muted-foreground hover:text-foreground"
+                }`}
+                onClick={() => setActiveTab("logs")}
+              >
+                CloudWatch Logs
+              </button>
+            )}
           </div>
         </CardHeader>
 
@@ -242,7 +250,7 @@ const RightSidebar: React.FC = () => {
             </>
           )}
 
-          {activeTab === "logs" && (
+          {isDev && activeTab === "logs" && (
             <div className="flex flex-col gap-1">
               {logsError && (
                 <div className="text-xs text-red-500 mb-2">Error: {logsError}</div>
