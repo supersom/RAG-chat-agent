@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Settings, Eye, EyeOff } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Settings, Eye, EyeOff, Upload, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -20,6 +20,8 @@ export type AppSettings = {
   bawsSecretAccessKey: string;
   models: string;
   knowledgeBaseId: string;
+  amplifyAppId: string;
+  awsRegion: string;
 };
 
 export function loadSettings(): AppSettings {
@@ -38,6 +40,8 @@ function emptySettings(): AppSettings {
     bawsSecretAccessKey: "",
     models: "",
     knowledgeBaseId: "",
+    amplifyAppId: "",
+    awsRegion: "",
   };
 }
 
@@ -79,6 +83,8 @@ function SecretField({
 export default function SettingsModal() {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState<AppSettings>(emptySettings());
+  const [importError, setImportError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (open) setForm({ ...emptySettings(), ...loadSettings() });
@@ -88,6 +94,36 @@ export default function SettingsModal() {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(form));
     setOpen(false);
     window.location.reload();
+  };
+
+  const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const parsed = JSON.parse(ev.target?.result as string);
+        const merged = { ...emptySettings(), ...parsed };
+        setForm(merged);
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(merged));
+        setImportError(null);
+      } catch {
+        setImportError("Invalid JSON file");
+      } finally {
+        if (fileInputRef.current) fileInputRef.current.value = "";
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const handleExport = () => {
+    const blob = new Blob([JSON.stringify(form, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "settings.json";
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   const set = (key: keyof AppSettings) => (v: string) =>
@@ -142,11 +178,61 @@ export default function SettingsModal() {
                 onChange={(e) => setForm((f) => ({ ...f, knowledgeBaseId: e.target.value }))}
               />
             </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-sm font-medium">Amplify App ID</label>
+              <Input
+                placeholder="abc123def"
+                value={form.amplifyAppId}
+                onChange={(e) => setForm((f) => ({ ...f, amplifyAppId: e.target.value }))}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-sm font-medium">AWS Region</label>
+              <Input
+                placeholder="us-east-1"
+                value={form.awsRegion}
+                onChange={(e) => setForm((f) => ({ ...f, awsRegion: e.target.value }))}
+              />
+            </div>
           </div>
 
-          <p className="text-xs text-muted-foreground">
-            Leave blank to use server environment variables. Saved to browser localStorage.
-          </p>
+          <div className="flex items-center justify-between">
+            <p className="text-xs text-muted-foreground">
+              Leave blank to use server environment variables.
+            </p>
+            <div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".json,application/json"
+                className="hidden"
+                onChange={handleImport}
+              />
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-1.5"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <Upload className="h-3.5 w-3.5" />
+                  Import JSON
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-1.5"
+                  onClick={handleExport}
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  Save as JSON
+                </Button>
+              </div>
+            </div>
+          </div>
+          {importError && (
+            <p className="text-xs text-red-500">{importError}</p>
+          )}
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
