@@ -2,6 +2,7 @@ import NextAuth, { type DefaultSession } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import { getUserByEmail, getUserByEmailAnyTenant } from "@/app/lib/db/users";
 import { verifyPassword } from "@/app/lib/auth/passwords";
+import authConfig from "./auth.config";
 
 declare module "next-auth" {
   interface User {
@@ -24,6 +25,7 @@ declare module "@auth/core/jwt" {
 }
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
+  ...authConfig,
   providers: [
     Credentials({
       credentials: {
@@ -56,25 +58,4 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       },
     }),
   ],
-  session: { strategy: "jwt" },
-  callbacks: {
-    async jwt({ token, user }) {
-      if (user) {
-        token.role = user.role;
-        token.tenantId = user.tenantId;
-      }
-      return token;
-    },
-    async session({ session, token }) {
-      if (session.user) {
-        session.user.role = token.role;
-        session.user.tenantId = token.tenantId;
-      }
-      return session;
-    },
-  },
-  pages: {
-    signIn: "/admin/login",
-  },
-  secret: process.env.AUTH_SECRET,
 });
