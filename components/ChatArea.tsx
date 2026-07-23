@@ -443,6 +443,7 @@ function ChatArea() {
         body: JSON.stringify({
           messages: [...messages, userMessage],
           model: selectedModel,
+          apiKey: uiSettings.llmApiKey || undefined,
         }),
       });
 

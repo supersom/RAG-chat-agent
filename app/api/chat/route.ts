@@ -51,6 +51,7 @@ const chatRequestSchema = z.object({
     )
     .min(1),
   model: z.string().min(1).optional(),
+  apiKey: z.string().min(1).optional(),
 });
 
 // Helper function to sanitize header values
@@ -79,7 +80,7 @@ export async function POST(req: Request) {
   if (!parseResult.success) {
     return Response.json({ error: "Invalid request" }, { status: 400 });
   }
-  const { messages, model } = parseResult.data;
+  const { messages, model, apiKey: clientApiKey } = parseResult.data;
 
   const tenantResult = await resolveTenantContext(req);
   if (isTenantResolutionError(tenantResult)) {
@@ -291,7 +292,12 @@ export async function POST(req: Request) {
     ];
 
     const { completion } = await import("litellm");
+    // TEMPORARY: client-supplied key takes priority over server env vars
+    // while this deployment has no real server-side LLM credential
+    // configured. Not tenant-scoped — see BACKLOG.md, this needs removing
+    // once a real key is provisioned server-side.
     const resolvedApiKey =
+      clientApiKey ||
       process.env.OPENAI_API_KEY ||
       process.env.ANTHROPIC_API_KEY ||
       process.env.OPENROUTER_API_KEY;
