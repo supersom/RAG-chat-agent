@@ -23,6 +23,7 @@ export type AppSettings = {
   amplifyAppId: string;
   awsRegion: string;
   nodeEnv: string;
+  tenantToken?: string;
 };
 
 export function loadSettings(): AppSettings {
@@ -44,6 +45,7 @@ function emptySettings(): AppSettings {
     amplifyAppId: "",
     awsRegion: "",
     nodeEnv: "",
+    tenantToken: "",
   };
 }
 
@@ -81,6 +83,8 @@ function SecretField({
     </div>
   );
 }
+
+const isDevEnv = process.env.NEXT_PUBLIC_APP_ENV === "development";
 
 export default function SettingsModal() {
   const [open, setOpen] = useState(false);
@@ -143,60 +147,70 @@ export default function SettingsModal() {
             <DialogTitle>Settings</DialogTitle>
           </DialogHeader>
 
-          <div className="flex flex-col gap-4 py-2">
-            <SecretField
-              label="LLM API Key"
-              value={form.llmApiKey}
-              placeholder="sk-..."
-              onChange={set("llmApiKey")}
-            />
-            <div className="flex flex-col gap-1">
-              <label className="text-sm font-medium">AWS Access Key ID</label>
-              <Input
-                placeholder="AKIA..."
-                value={form.bawsAccessKeyId}
-                onChange={(e) => setForm((f) => ({ ...f, bawsAccessKeyId: e.target.value }))}
+          {isDevEnv && (
+            <div className="flex flex-col gap-4 py-2">
+              <SecretField
+                label="LLM API Key"
+                value={form.llmApiKey}
+                placeholder="sk-..."
+                onChange={set("llmApiKey")}
               />
-            </div>
-            <SecretField
-              label="AWS Secret Access Key"
-              value={form.bawsSecretAccessKey}
-              placeholder="your secret"
-              onChange={set("bawsSecretAccessKey")}
-            />
-            <div className="flex flex-col gap-1">
-              <label className="text-sm font-medium">Models (id:Name, comma-separated)</label>
-              <Input
-                placeholder="gpt-4o-mini:GPT-4o Mini,gpt-4o:GPT-4o"
-                value={form.models}
-                onChange={(e) => setForm((f) => ({ ...f, models: e.target.value }))}
+              <div className="flex flex-col gap-1">
+                <label className="text-sm font-medium">AWS Access Key ID</label>
+                <Input
+                  placeholder="AKIA..."
+                  value={form.bawsAccessKeyId}
+                  onChange={(e) => setForm((f) => ({ ...f, bawsAccessKeyId: e.target.value }))}
+                />
+              </div>
+              <SecretField
+                label="AWS Secret Access Key"
+                value={form.bawsSecretAccessKey}
+                placeholder="your secret"
+                onChange={set("bawsSecretAccessKey")}
               />
+              <div className="flex flex-col gap-1">
+                <label className="text-sm font-medium">Models (id:Name, comma-separated)</label>
+                <Input
+                  placeholder="gpt-4o-mini:GPT-4o Mini,gpt-4o:GPT-4o"
+                  value={form.models}
+                  onChange={(e) => setForm((f) => ({ ...f, models: e.target.value }))}
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-sm font-medium">Knowledge Base ID</label>
+                <Input
+                  placeholder="ABCD1234EF"
+                  value={form.knowledgeBaseId}
+                  onChange={(e) => setForm((f) => ({ ...f, knowledgeBaseId: e.target.value }))}
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-sm font-medium">Amplify App ID</label>
+                <Input
+                  placeholder="abc123def"
+                  value={form.amplifyAppId}
+                  onChange={(e) => setForm((f) => ({ ...f, amplifyAppId: e.target.value }))}
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-sm font-medium">AWS Region</label>
+                <Input
+                  placeholder="us-east-1"
+                  value={form.awsRegion}
+                  onChange={(e) => setForm((f) => ({ ...f, awsRegion: e.target.value }))}
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-sm font-medium">Tenant Embed Token</label>
+                <Input
+                  placeholder="eyJhbGciOi..."
+                  value={form.tenantToken ?? ""}
+                  onChange={(e) => setForm((f) => ({ ...f, tenantToken: e.target.value }))}
+                />
+              </div>
             </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-sm font-medium">Knowledge Base ID</label>
-              <Input
-                placeholder="ABCD1234EF"
-                value={form.knowledgeBaseId}
-                onChange={(e) => setForm((f) => ({ ...f, knowledgeBaseId: e.target.value }))}
-              />
-            </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-sm font-medium">Amplify App ID</label>
-              <Input
-                placeholder="abc123def"
-                value={form.amplifyAppId}
-                onChange={(e) => setForm((f) => ({ ...f, amplifyAppId: e.target.value }))}
-              />
-            </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-sm font-medium">AWS Region</label>
-              <Input
-                placeholder="us-east-1"
-                value={form.awsRegion}
-                onChange={(e) => setForm((f) => ({ ...f, awsRegion: e.target.value }))}
-              />
-            </div>
-          </div>
+          )}
 
           <label className="flex items-center gap-2 cursor-pointer w-fit">
             <input

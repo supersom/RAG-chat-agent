@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useRef } from "react";
+import { useSession } from "next-auth/react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { FileIcon, MessageCircleIcon } from "lucide-react";
 import FullSourceModal from "./FullSourceModal";
@@ -61,7 +62,10 @@ const MAX_HISTORY = 15;
 const POLL_INTERVAL_MS = 5000;
 
 const RightSidebar: React.FC = () => {
-  const isDev = loadSettings().nodeEnv === "development";
+  const { data: session } = useSession();
+  const isDev =
+    loadSettings().nodeEnv === "development" &&
+    session?.user?.role === "admin";
   const [activeTab, setActiveTab] = useState<"kb" | "logs">("kb");
 
   // KB history state

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import config from "@/config";
 import { loadSettings } from "@/components/SettingsModal";
+import { getTenantToken } from "@/app/lib/tenant-client";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import ReactMarkdown from "react-markdown";
@@ -435,14 +436,13 @@ function ChatArea() {
       const startTime = performance.now();
       const response = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-tenant-token": getTenantToken() ?? "",
+        },
         body: JSON.stringify({
           messages: [...messages, userMessage],
           model: selectedModel,
-          knowledgeBaseId: selectedKnowledgeBase,
-          llmApiKey: uiSettings.llmApiKey || undefined,
-          bawsAccessKeyId: uiSettings.bawsAccessKeyId || undefined,
-          bawsSecretAccessKey: uiSettings.bawsSecretAccessKey || undefined,
         }),
       });
 
