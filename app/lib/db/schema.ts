@@ -12,6 +12,8 @@ export interface Tenant {
   guardrailVersion: string;
   allowedOrigins?: string[];
   awsCredentialsSecretArn?: string;
+  amplifyAppId?: string;
+  awsRegion?: string;
   createdAt: string;
 }
 

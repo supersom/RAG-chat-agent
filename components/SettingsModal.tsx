@@ -20,8 +20,6 @@ export type AppSettings = {
   bawsSecretAccessKey: string;
   models: string;
   knowledgeBaseId: string;
-  amplifyAppId: string;
-  awsRegion: string;
   nodeEnv: string;
   tenantToken?: string;
 };
@@ -42,8 +40,6 @@ function emptySettings(): AppSettings {
     bawsSecretAccessKey: "",
     models: "",
     knowledgeBaseId: "",
-    amplifyAppId: "",
-    awsRegion: "",
     nodeEnv: "",
     tenantToken: "",
   };
@@ -186,22 +182,6 @@ export default function SettingsModal() {
                   placeholder="ABCD1234EF"
                   value={form.knowledgeBaseId}
                   onChange={(e) => setForm((f) => ({ ...f, knowledgeBaseId: e.target.value }))}
-                />
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-sm font-medium">Amplify App ID</label>
-                <Input
-                  placeholder="abc123def"
-                  value={form.amplifyAppId}
-                  onChange={(e) => setForm((f) => ({ ...f, amplifyAppId: e.target.value }))}
-                />
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-sm font-medium">AWS Region</label>
-                <Input
-                  placeholder="us-east-1"
-                  value={form.awsRegion}
-                  onChange={(e) => setForm((f) => ({ ...f, awsRegion: e.target.value }))}
                 />
               </div>
               <div className="flex flex-col gap-1">

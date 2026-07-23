@@ -3,6 +3,7 @@ import {
   FilterLogEventsCommand,
 } from "@aws-sdk/client-cloudwatch-logs";
 import { auth } from "@/auth";
+import { getTenant } from "@/app/lib/db/tenants";
 
 export async function POST(req: Request) {
   const session = await auth();
@@ -13,10 +14,15 @@ export async function POST(req: Request) {
     return Response.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const { amplifyAppId, awsRegion, startTime } = await req.json();
+  const tenant = await getTenant(session.user.tenantId);
+  if (!tenant) {
+    return Response.json({ error: "Tenant not found" }, { status: 404 });
+  }
 
-  const appId = amplifyAppId || process.env.AMPLIFY_APP_ID;
-  const region = awsRegion || process.env.AWS_REGION || "us-east-2";
+  const { startTime } = await req.json();
+
+  const appId = tenant.amplifyAppId || process.env.AMPLIFY_APP_ID;
+  const region = tenant.awsRegion || process.env.AWS_REGION || "us-east-2";
   const accessKeyId = process.env.BAWS_ACCESS_KEY_ID;
   const secretAccessKey = process.env.BAWS_SECRET_ACCESS_KEY;
 

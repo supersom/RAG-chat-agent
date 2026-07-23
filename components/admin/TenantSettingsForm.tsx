@@ -45,6 +45,8 @@ export default function TenantSettingsForm({
   const [allowedModels, setAllowedModels] = useState(
     (tenant.llmProviderDefaults.allowedModels ?? []).join(", "),
   );
+  const [amplifyAppId, setAmplifyAppId] = useState(tenant.amplifyAppId ?? "");
+  const [awsRegion, setAwsRegion] = useState(tenant.awsRegion ?? "");
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -65,6 +67,8 @@ export default function TenantSettingsForm({
         guardrailId,
         guardrailVersion,
         allowedOrigins: parseList(allowedOrigins),
+        amplifyAppId,
+        awsRegion,
         llmProviderDefaults: {
           provider: tenant.llmProviderDefaults.provider,
           model,
@@ -152,6 +156,34 @@ export default function TenantSettingsForm({
             <p className="text-xs text-muted-foreground">
               One origin per line, or comma-separated.
             </p>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label htmlFor="amplifyAppId" className="text-sm font-medium">
+              Amplify App ID
+            </label>
+            <Input
+              id="amplifyAppId"
+              placeholder="abc123def"
+              value={amplifyAppId}
+              onChange={(e) => setAmplifyAppId(e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">
+              Used to fetch CloudWatch logs for this organization&apos;s
+              deployment.
+            </p>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label htmlFor="awsRegion" className="text-sm font-medium">
+              AWS Region
+            </label>
+            <Input
+              id="awsRegion"
+              placeholder="us-east-1"
+              value={awsRegion}
+              onChange={(e) => setAwsRegion(e.target.value)}
+            />
           </div>
 
           <div className="flex flex-col gap-1">

@@ -10,6 +10,8 @@ const editableTenantSchema = z
     guardrailId: z.string().optional(),
     guardrailVersion: z.string().optional(),
     allowedOrigins: z.array(z.string()).optional(),
+    amplifyAppId: z.string().optional(),
+    awsRegion: z.string().optional(),
     llmProviderDefaults: z
       .object({
         provider: z.string(),

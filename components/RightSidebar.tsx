@@ -121,8 +121,6 @@ const RightSidebar: React.FC = () => {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            amplifyAppId: settings.amplifyAppId || undefined,
-            awsRegion: settings.awsRegion || undefined,
             bawsAccessKeyId: settings.bawsAccessKeyId || undefined,
             bawsSecretAccessKey: settings.bawsSecretAccessKey || undefined,
             startTime: lastTimestampRef.current,
