@@ -11,6 +11,7 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
     "dev:full": "npm run dev",
     "dev:left": "NEXT_PUBLIC_INCLUDE_LEFT_SIDEBAR=true NEXT_PUBLIC_INCLUDE_RIGHT_SIDEBAR=false next dev",
     "dev:right": "NEXT_PUBLIC_INCLUDE_LEFT_SIDEBAR=false NEXT_PUBLIC_INCLUDE_RIGHT_SIDEBAR=true next dev",
@@ -59,6 +60,7 @@
     "eslint-config-next": "14.2.5",
     "postcss": "^8",
     "tailwindcss": "^3.4.1",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^4.1.10"
   }
 }
