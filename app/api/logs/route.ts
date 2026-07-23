@@ -6,7 +6,10 @@ import { auth } from "@/auth";
 
 export async function POST(req: Request) {
   const session = await auth();
-  if (!session || session.user.role !== "admin") {
+  if (!session) {
+    return Response.json({ error: "Authentication required" }, { status: 401 });
+  }
+  if (session.user.role !== "admin") {
     return Response.json({ error: "Forbidden" }, { status: 403 });
   }
 
