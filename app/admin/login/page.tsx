@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { useRouter } from "next/navigation";
 import { signIn } from "next-auth/react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,7 +14,6 @@ import {
 } from "@/components/ui/card";
 
 export default function AdminLoginPage() {
-  const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -39,7 +37,11 @@ export default function AdminLoginPage() {
       return;
     }
 
-    router.push("/admin");
+    // Hard navigation, not router.push: a client-side soft navigation can
+    // race the just-set session cookie, so middleware's auth check
+    // sometimes runs before the cookie is visible to it and silently
+    // bounces back here with no error shown.
+    window.location.href = "/admin";
   }
 
   return (
