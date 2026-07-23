@@ -2,6 +2,7 @@ import { z } from "zod";
 import { retrieveContext, RAGSource } from "@/app/lib/utils";
 import crypto from "crypto";
 import customerSupportCategories from "@/app/lib/customer_support_categories.json";
+import { resolveTenantContext, isTenantResolutionError } from "@/app/lib/tenant";
 
 // Debug message helper function
 // Input: message string and optional data object
@@ -39,6 +40,18 @@ const responseSchema = z.object({
     .optional(),
 });
 
+const chatRequestSchema = z.object({
+  messages: z
+    .array(
+      z.object({
+        role: z.enum(["user", "assistant", "system"]),
+        content: z.string().min(1).max(8000),
+      }),
+    )
+    .min(1),
+  model: z.string().min(1).optional(),
+});
+
 // Helper function to sanitize header values
 // Input: string value
 // Output: sanitized string (ASCII characters only)
@@ -60,8 +73,30 @@ export async function POST(req: Request) {
   const apiStart = performance.now();
   const measureTime = (label: string) => logTimestamp(label, apiStart);
 
-  // Extract data from the request body
-  const { messages, model, knowledgeBaseId, llmApiKey, bawsAccessKeyId, bawsSecretAccessKey } = await req.json();
+  // Extract and validate data from the request body
+  const parseResult = chatRequestSchema.safeParse(await req.json());
+  if (!parseResult.success) {
+    return Response.json({ error: "Invalid request" }, { status: 400 });
+  }
+  const { messages, model } = parseResult.data;
+
+  const tenantResult = await resolveTenantContext(req);
+  if (isTenantResolutionError(tenantResult)) {
+    return Response.json(
+      { error: tenantResult.error },
+      { status: tenantResult.status },
+    );
+  }
+  const tenant = tenantResult;
+
+  const allowedModels = tenant.llmProviderDefaults.allowedModels ?? [
+    tenant.llmProviderDefaults.model,
+  ];
+  const resolvedModel =
+    model && allowedModels.includes(model)
+      ? model
+      : tenant.llmProviderDefaults.model;
+
   const latestMessage = messages[messages.length - 1].content;
 
   console.log("📝 Latest Query:", latestMessage);
@@ -85,10 +120,12 @@ export async function POST(req: Request) {
   try {
     console.log("🔍 Initiating RAG retrieval for query:", latestMessage);
     measureTime("RAG Start");
-    const result = await retrieveContext(latestMessage, knowledgeBaseId, 3, {
-      accessKeyId: bawsAccessKeyId || process.env.BAWS_ACCESS_KEY_ID,
-      secretAccessKey: bawsSecretAccessKey || process.env.BAWS_SECRET_ACCESS_KEY,
-    });
+    const result = await retrieveContext(
+      latestMessage,
+      tenant.knowledgeBaseId,
+      3,
+      tenant.awsCredentials,
+    );
     retrievedContext = result.context;
     isRagWorking = result.isRagWorking;
     ragSources = result.ragSources || [];
@@ -214,18 +251,17 @@ export async function POST(req: Request) {
     ];
 
     const { completion } = await import("litellm");
-    const resolvedApiKey = llmApiKey ||
+    const resolvedApiKey =
       process.env.OPENAI_API_KEY ||
       process.env.ANTHROPIC_API_KEY ||
       process.env.OPENROUTER_API_KEY;
 
-    if (resolvedApiKey) process.env.OPENAI_API_KEY = resolvedApiKey;
-
     const response = await (completion as any)({
-      model: model,
+      model: resolvedModel,
       max_tokens: 1000,
       messages: litellmMessages,
       temperature: 0.3,
+      apiKey: resolvedApiKey,
       response_format: { type: "json_object" },
     });
 
