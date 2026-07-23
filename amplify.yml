@@ -13,5 +13,4 @@ frontend:
       - "**/*"
   cache:
     paths:
-      - .next/cache/**/*
       - .npm/**/*
