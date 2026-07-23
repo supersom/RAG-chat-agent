@@ -34,6 +34,50 @@ BAWS_SECRET_ACCESS_KEY=your_aws_secret_key
 
 Note: We are adding a 'B' in front of the AWS environment variables for a reason that will be discussed later in the deployment section.
 
+### Auth & Multi-tenancy
+
+Authentication and multi-tenancy are backed by two DynamoDB tables. Add the following to your `.env.local`:
+
+```
+AUTH_SECRET=your-auth-secret
+TENANT_JWT_SECRET=your-tenant-jwt-secret
+DYNAMODB_TENANTS_TABLE=your-tenants-table-name
+DYNAMODB_USERS_TABLE=your-users-table-name
+```
+
+- `AUTH_SECRET` — secret used to sign admin/end-user session tokens.
+- `TENANT_JWT_SECRET` — secret used to sign/verify tenant-scoped JWTs.
+- `DYNAMODB_TENANTS_TABLE` — name of the DynamoDB table storing tenants.
+- `DYNAMODB_USERS_TABLE` — name of the DynamoDB table storing users.
+
+Provision the two tables with the AWS CLI:
+
+```bash
+aws dynamodb create-table \
+  --table-name your-tenants-table-name \
+  --attribute-definitions AttributeName=tenantId,AttributeType=S \
+  --key-schema AttributeName=tenantId,KeyType=HASH \
+  --billing-mode PAY_PER_REQUEST
+
+aws dynamodb create-table \
+  --table-name your-users-table-name \
+  --attribute-definitions \
+      AttributeName=userId,AttributeType=S \
+      AttributeName=email,AttributeType=S \
+      AttributeName=tenantId,AttributeType=S \
+  --key-schema AttributeName=userId,KeyType=HASH \
+  --global-secondary-indexes \
+      '[{
+        "IndexName": "email-index",
+        "KeySchema": [
+          {"AttributeName": "email", "KeyType": "HASH"},
+          {"AttributeName": "tenantId", "KeyType": "RANGE"}
+        ],
+        "Projection": {"ProjectionType": "ALL"}
+      }]' \
+  --billing-mode PAY_PER_REQUEST
+```
+
 ##  How to Get Your Keys
 
 ### Claude API Key
