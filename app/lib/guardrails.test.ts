@@ -74,4 +74,12 @@ describe("applyGuardrail", () => {
       content: [{ text: { text: baseParams.text } }],
     });
   });
+
+  it("skips the AWS call and passes text through unchanged when guardrailId is empty", async () => {
+    const result = await applyGuardrail({ ...baseParams, guardrailId: "" });
+
+    expect(result).toEqual({ blocked: false, outputText: baseParams.text });
+    expect(mockedBedrockRuntimeClient).not.toHaveBeenCalled();
+    expect(sendMock).not.toHaveBeenCalled();
+  });
 });

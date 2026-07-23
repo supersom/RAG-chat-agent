@@ -16,6 +16,13 @@ export async function applyGuardrail(params: {
   credentials: { accessKeyId: string; secretAccessKey: string };
   region?: string;
 }): Promise<GuardrailResult> {
+  // No guardrail configured for this tenant yet (e.g. a freshly signed-up
+  // tenant) — skip screening entirely rather than letting AWS reject an
+  // empty guardrail identifier and falling into the caller's error handling.
+  if (!params.guardrailId) {
+    return { blocked: false, outputText: params.text };
+  }
+
   const client = new BedrockRuntimeClient({
     region: params.region ?? process.env.AWS_REGION ?? "us-east-1",
     credentials: params.credentials,
