@@ -147,6 +147,17 @@ export default function SettingsModal() {
             <DialogTitle>Settings</DialogTitle>
           </DialogHeader>
 
+          <div className="flex flex-col gap-4 py-2">
+            <div className="flex flex-col gap-1">
+              <label className="text-sm font-medium">Models (id:Name, comma-separated)</label>
+              <Input
+                placeholder="gpt-4o-mini:GPT-4o Mini,gpt-4o:GPT-4o"
+                value={form.models}
+                onChange={(e) => setForm((f) => ({ ...f, models: e.target.value }))}
+              />
+            </div>
+          </div>
+
           {isDevEnv && (
             <div className="flex flex-col gap-4 py-2">
               <SecretField
@@ -169,14 +180,6 @@ export default function SettingsModal() {
                 placeholder="your secret"
                 onChange={set("bawsSecretAccessKey")}
               />
-              <div className="flex flex-col gap-1">
-                <label className="text-sm font-medium">Models (id:Name, comma-separated)</label>
-                <Input
-                  placeholder="gpt-4o-mini:GPT-4o Mini,gpt-4o:GPT-4o"
-                  value={form.models}
-                  onChange={(e) => setForm((f) => ({ ...f, models: e.target.value }))}
-                />
-              </div>
               <div className="flex flex-col gap-1">
                 <label className="text-sm font-medium">Knowledge Base ID</label>
                 <Input
