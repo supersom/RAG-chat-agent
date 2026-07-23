@@ -37,8 +37,8 @@ export async function POST(req: Request) {
     name: tenantName,
     knowledgeBaseId: process.env.NEXT_PUBLIC_KNOWLEDGE_BASE_ID || "",
     llmProviderDefaults: {
-      provider: "anthropic",
-      model: "claude-sonnet-4-5",
+      provider: "openai",
+      model: "gpt-4o-mini",
     },
     requireEndUserAuth: false,
     guardrailId: "",
