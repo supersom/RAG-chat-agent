@@ -3,6 +3,7 @@ import { retrieveContext, RAGSource } from "@/app/lib/utils";
 import crypto from "crypto";
 import customerSupportCategories from "@/app/lib/customer_support_categories.json";
 import { resolveTenantContext, isTenantResolutionError } from "@/app/lib/tenant";
+import { applyGuardrail, GuardrailResult } from "@/app/lib/guardrails";
 
 // Debug message helper function
 // Input: message string and optional data object
@@ -110,6 +111,45 @@ export async function POST(req: Request) {
       latestMessageLength: latestMessage.length,
     }),
   ).slice(0, MAX_DEBUG_LENGTH);
+
+  // Screen the input with the guardrail before any further processing.
+  // Fails closed: any error calling the guardrail blocks the request.
+  let inputGuardrail: GuardrailResult;
+  try {
+    inputGuardrail = await applyGuardrail({
+      text: latestMessage,
+      source: "INPUT",
+      guardrailId: tenant.guardrailId,
+      guardrailVersion: tenant.guardrailVersion,
+      credentials: tenant.awsCredentials,
+    });
+  } catch (err) {
+    console.error("Guardrail (input) call failed, failing closed:", err);
+    return Response.json(
+      {
+        id: crypto.randomUUID(),
+        response: "Sorry, I'm unable to process that request right now.",
+        thinking: "Guardrail check failed",
+        user_mood: "neutral",
+        suggested_questions: [],
+        debug: { context_used: false },
+      },
+      { status: 200 },
+    );
+  }
+  if (inputGuardrail.blocked) {
+    return Response.json(
+      {
+        id: crypto.randomUUID(),
+        response: inputGuardrail.outputText,
+        thinking: "Blocked by guardrail",
+        user_mood: "neutral",
+        suggested_questions: [],
+        debug: { context_used: false },
+      },
+      { status: 200 },
+    );
+  }
 
   // Initialize variables for RAG retrieval
   let retrievedContext = "";
@@ -280,6 +320,23 @@ export async function POST(req: Request) {
     }
 
     const validatedResponse = responseSchema.parse(parsedResponse);
+
+    // Screen the output with the guardrail. Fails open: an error calling
+    // the guardrail does not block an already-generated response.
+    try {
+      const outputGuardrail = await applyGuardrail({
+        text: validatedResponse.response,
+        source: "OUTPUT",
+        guardrailId: tenant.guardrailId,
+        guardrailVersion: tenant.guardrailVersion,
+        credentials: tenant.awsCredentials,
+      });
+      if (outputGuardrail.blocked) {
+        validatedResponse.response = outputGuardrail.outputText;
+      }
+    } catch (err) {
+      console.error("Guardrail (output) call failed, failing open:", err);
+    }
 
     const responseWithId = {
       id: crypto.randomUUID(),
