@@ -523,6 +523,22 @@ function ChatArea() {
     } catch (error) {
       console.error("Error fetching chat response:", error);
       console.error("Failed to process message:", userMessage.content);
+      setMessages((prevMessages) =>
+        prevMessages.map((message) =>
+          message.id === placeholderMessage.id
+            ? {
+                ...message,
+                content: JSON.stringify({
+                  response:
+                    "Sorry, something went wrong processing that message. Please try again.",
+                  thinking: "Request failed",
+                  user_mood: "neutral",
+                  debug: { context_used: false },
+                }),
+              }
+            : message,
+        ),
+      );
     } finally {
       setIsLoading(false);
       const clientEnd = performance.now();
