@@ -40,6 +40,8 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
 
         if (!email || !password) return null;
 
+        // No tenantId means this is the admin-login path, where the tenant
+        // isn't known until after auth — fall back to the unscoped lookup.
         const user = tenantId
           ? await getUserByEmail(tenantId, email)
           : await getUserByEmailAnyTenant(email);

@@ -24,6 +24,8 @@ export async function getUserByEmail(
   return (result.Items?.[0] as User) || null;
 }
 
+// Intentionally unscoped by tenant — used only for the admin-login path, where
+// the tenant isn't known until after the user is authenticated.
 export async function getUserByEmailAnyTenant(
   email: string,
 ): Promise<User | null> {
