@@ -43,6 +43,21 @@ export async function getUserByEmailAnyTenant(
   return (result.Items?.[0] as User) || null;
 }
 
+export async function getUsersByTenant(tenantId: string): Promise<User[]> {
+  const result = await ddbDocClient.send(
+    new QueryCommand({
+      TableName: TABLE_NAME,
+      IndexName: "tenantId-index",
+      KeyConditionExpression: "tenantId = :tenantId",
+      ExpressionAttributeValues: {
+        ":tenantId": tenantId,
+      },
+    }),
+  );
+
+  return (result.Items as User[]) || [];
+}
+
 export async function createUser(
   input: Omit<User, "userId" | "createdAt">,
 ): Promise<User> {

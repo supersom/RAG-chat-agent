@@ -26,6 +26,12 @@ export default function AdminLayout({
             >
               Embed Snippet
             </Link>
+            <Link
+              href="/admin/users"
+              className="text-sm font-medium text-muted-foreground hover:text-foreground"
+            >
+              Users
+            </Link>
           </div>
         </div>
         <LogoutButton />
