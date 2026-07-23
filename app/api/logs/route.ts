@@ -8,7 +8,7 @@ export async function POST(req: Request) {
     await req.json();
 
   const appId = amplifyAppId || process.env.AMPLIFY_APP_ID;
-  const region = awsRegion || process.env.AWS_REGION || "us-east-1";
+  const region = awsRegion || process.env.AWS_REGION || "us-east-2";
   const accessKeyId = bawsAccessKeyId || process.env.BAWS_ACCESS_KEY_ID;
   const secretAccessKey = bawsSecretAccessKey || process.env.BAWS_SECRET_ACCESS_KEY;
 
