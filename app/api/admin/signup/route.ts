@@ -27,7 +27,7 @@ export async function POST(req: Request) {
   const tenant = await createTenant({
     tenantId: ulid(),
     name: tenantName,
-    knowledgeBaseId: "",
+    knowledgeBaseId: process.env.NEXT_PUBLIC_KNOWLEDGE_BASE_ID || "",
     llmProviderDefaults: {
       provider: "anthropic",
       model: "claude-sonnet-4-5",
