@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { ulid } from "ulid";
 import { createTenant } from "@/app/lib/db/tenants";
-import { createUser } from "@/app/lib/db/users";
+import { createUser, getUserByEmailAnyTenant } from "@/app/lib/db/users";
 import { hashPassword } from "@/app/lib/auth/passwords";
 
 const signupSchema = z.object({
@@ -23,6 +23,14 @@ export async function POST(req: Request) {
   }
 
   const { tenantName, email, password } = parsed.data;
+
+  const existingUser = await getUserByEmailAnyTenant(email);
+  if (existingUser) {
+    return NextResponse.json(
+      { error: "An account with this email already exists" },
+      { status: 409 },
+    );
+  }
 
   const tenant = await createTenant({
     tenantId: ulid(),
