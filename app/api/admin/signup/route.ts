@@ -24,7 +24,24 @@ export async function POST(req: Request) {
 
   const { tenantName, email, password } = parsed.data;
 
-  const existingUser = await getUserByEmailAnyTenant(email);
+  let existingUser;
+  try {
+    existingUser = await getUserByEmailAnyTenant(email);
+  } catch (err: any) {
+    return NextResponse.json(
+      {
+        TEMP_DIAG: true,
+        errName: err?.name,
+        errMessage: err?.message,
+        errConstructor: err?.constructor?.name,
+        accessKeyIdLen: (process.env.BAWS_ACCESS_KEY_ID || "").length,
+        secretKeyLen: (process.env.BAWS_SECRET_ACCESS_KEY || "").length,
+        accessKeyIdType: typeof process.env.BAWS_ACCESS_KEY_ID,
+        secretKeyType: typeof process.env.BAWS_SECRET_ACCESS_KEY,
+      },
+      { status: 500 },
+    );
+  }
   if (existingUser) {
     return NextResponse.json(
       { error: "An account with this email already exists" },
