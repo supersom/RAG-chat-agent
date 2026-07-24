@@ -81,3 +81,109 @@ A related follow-up surfaced once this worked: `/login?callbackUrl=%2Fadmin` was
 The sign-in prompt gap was real: `resolveTenantContext()` (`app/lib/tenant.ts`) returns three different 401 reasons — `"Missing tenant token"`, `"Invalid or expired tenant token"`, `"Authentication required"` — but `ChatArea.tsx` only recognized the exact `"Authentication required"` string; the other two fell through to a generic "Sorry, something went wrong" chat bubble that looked like a broken assistant reply rather than an auth problem. Initial framing was "the page doesn't know what tenant you mean" (no session, no `?t=` token) — corrected after pushback: all three 401 branches in `resolveTenantContext` only fire when there's no session, checked first and unconditionally, so *any* 401 from `/api/chat` structurally means "not signed in," and signing in resolves all three via `session.user.tenantId` regardless of which reason fired. Checking the status code instead of the message is both simpler and more correct than enumerating every string.
 
 **Status:** Pushed directly to `main` (`b5fad2e`, no PR), redeployed, and verified live in-browser: visiting `kbsearch.somdutta.com` logged out and sending a message now shows "Please sign in to continue chatting" with a working Sign in button.
+
+## 2026-07-24 — Per-tenant LLM provider/API key/model config: two incidents worth remembering
+
+**Context:** Built `worktree-tenant-llm-config` (PR #3) — each tenant can configure its own LLM provider/API key/allowed-models, taking precedence over the main app's server env-var defaults, which in turn take precedence over the existing dev-only client-supplied key. Schema change, AES-256-GCM at-rest encryption, three-tier resolution logic, admin UI, and a fix to a latent signup bug (new tenants were hardcoded to `provider: "openai", model: "gpt-4o-mini"`, which would break signups on any non-OpenAI deployment). Built task-by-task via subagent-driven development with a task reviewer after each step and a final whole-branch review; two Important findings from that final review (untested PATCH merge/validation logic, an unguarded decrypt throw on the chat hot path) were fixed and re-reviewed clean before merge. Full narrative and code-level detail lives in `docs/superpowers/specs/2026-07-24-tenant-llm-config-design.md` and `docs/superpowers/plans/2026-07-24-tenant-llm-config.md`.
+
+Two incidents from this session are worth remembering beyond the feature itself:
+
+### Incident 1: a Server→Client prop leak, caught during planning rather than review
+
+While writing the implementation plan, re-reading `app/admin/page.tsx` turned up something the spec hadn't accounted for: it's a Server Component that fetches the tenant via a direct `getTenant()` DB call and was passing the *raw* tenant object — including the new encrypted `apiKeyCiphertext` field — as a prop into `TenantSettingsForm`, a Client Component. Next.js serializes Server→Client Component props into the page payload the browser receives, exactly like an API response body. Redacting only the `/api/admin/tenant` route (the obvious place to look) would have left this second, easy-to-miss path wide open. Fixed by extracting a single shared `redactTenant()` utility (`app/lib/tenant-redact.ts`) used at both exit points, so they can't drift apart — and both the encryption module and this redaction utility got extra-scrutiny reviews specifically because they were flagged as the highest-stakes pieces going in.
+
+**Takeaway:** when a schema gains a secret field, grep every consumer of the type, not just the API routes that obviously return it — Server Component props into Client Components are a real, easy-to-miss serialization boundary in the App Router.
+
+### Incident 2: committed real AWS credentials into the plan doc, caught by GitHub before anything left the machine
+
+While drafting the plan's deployment task, I quoted the live output of `aws amplify get-app` (fetched to discover the target preview app's config) verbatim into an example `aws amplify update-app` command in the committed plan file — including real `BAWS_ACCESS_KEY_ID`/`BAWS_SECRET_ACCESS_KEY` values. `git push` was rejected outright by GitHub's push protection before anything reached the remote.
+
+**Decision:** Scrub the secret from this branch's history via `git filter-branch --tree-filter`, scoped explicitly to `9859e7d..HEAD` (this branch's own commits only) — not `git-filter-repo`, which was available and is the modern recommended tool, but rewrites *all* refs in the repository by default. This worktree shares its `.git` object store with the main checkout and any other concurrent worktree sessions; running a repo-wide rewrite here would have corrupted `main` and any other in-progress session out from under it. `git filter-branch`, despite being the deprecated/slower tool, respects an explicit revision range and only moves the one ref you point it at.
+
+**Reasoning:** All 13 commits on this branch were unpushed and entirely local, making a scoped history rewrite low-risk and fully reversible up to that point (nothing external depended on the old hashes). Verified via `grep` across the full rewritten range that no trace of either secret remained, confirmed `git status` was clean and `npm test` still passed post-rewrite, then re-pushed successfully.
+
+**Also encountered, smaller:** the AWS CLI's `--environment-variables` shorthand syntax silently mis-parses a value containing a comma (`NEXT_PUBLIC_MODELS`'s `"id:Name,id2:Name2"` format) as a list separator, throwing a `ParamValidation` type error. Fixed by switching to `--cli-input-json file://...` for that call instead of shorthand key=value,key=value syntax.
+
+**Status:** PR #3 open (https://github.com/supersom/RAG-chat-agent/pull/3), branch pushed clean, live-verified against preview app `d2l47euepvccx6`: admin UI renders provider/API-key fields, saved keys are never re-exposed to the client (confirmed via accessibility-tree inspection, not just visual masking), chat correctly routes to the tenant's own provider using their own key (Anthropic-specific auth error confirmed the routing, not just a generic failure), and clearing the key correctly falls back to the main app's defaults.
+
+**Takeaway:** never inline live-fetched command output (`aws ... get-*`, `kubectl get -o yaml`, etc.) directly into a committed file, even a plan/spec doc meant only to describe *what command to run* — use a placeholder and a "fetch fresh before running" note instead. And in a shared-`.git` worktree setup, `git-filter-repo`'s repo-wide default makes it the *wrong* tool for a scoped fix, even though it's the generally-recommended replacement for `filter-branch` in a normal single-checkout repo.
+
+## 2026-07-24 — Main app auth actions surfaced in the chat nav
+
+**Context:** After adding admin/end-user auth flows, the main chat surface still did not expose session actions directly. Admins had to know to navigate to `/admin`, and logged-in users did not have a visible logout control on the main app.
+
+**Decision:** Add role-aware actions to `components/TopNavBar.tsx`: admins see `Manage` (links to `/admin`) and `Log out`; end users see `Log out`; logged-out visitors see no new auth action. Reused `components/LogoutButton.tsx` so logout behavior stays consistent with the admin layout, and added a small logout icon for recognizability.
+
+**Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck` and `npm run lint`. Not pushed; no Amplify deploy triggered.
+
+## 2026-07-24 — Admin chat sidebar now defaults to live CloudWatch logs
+
+**Context:** While logged into an admin account on the main chat surface, CloudWatch logs were easy to miss because `components/RightSidebar.tsx` always initialized on the Knowledge Base tab and only started polling `/api/logs` when the CloudWatch Logs tab was active. The logs API itself is admin-gated and queries the logged-in tenant's configured `amplifyAppId`/`awsRegion`, so tenant metadata also determines which deployment's logs appear.
+
+**Decision:** When the client session resolves to an admin user, automatically switch the right sidebar to the CloudWatch Logs tab and make the polling effect depend on `canViewLogs` as well as the active tab. This starts polling only after the admin session is known, and keeps non-admin users from polling the admin-only endpoint.
+
+**Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck` and `npm run lint`. Not pushed; no Amplify deploy triggered.
+
+## 2026-07-24 — Masked fields now have reveal controls
+
+**Context:** Password and API-key inputs should be maskable by default but inspectable by the user when needed. `SettingsModal.tsx` already had a local secret-field eye toggle, but login/signup/admin-user password fields and the tenant LLM API-key field did not.
+
+**Decision:** Add a reusable `components/ui/masked-input.tsx` control with `Eye`/`EyeOff` toggling, then use it for login password, admin signup password, admin user creation password, tenant API key, and the existing settings modal secret fields.
+
+**Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck` and `npm run lint`. Not pushed; no Amplify deploy triggered.
+
+## 2026-07-24 — Persistent activity history design
+
+**Context:** Chat messages, assistant thinking, knowledge-base source references, and admin CloudWatch logs currently live only in client-side React state. Navigating away, refreshing, logging out, or logging back in loses them. The requested behavior needs durable, per-user history plus admin visibility across users in the same tenant, with a hard guarantee that cross-tenant logs are never exposed.
+
+**Decision:** Document a server-side activity-history design in `docs/superpowers/specs/2026-07-24-persistent-activity-history.md`. The recommended path is a new tenant-keyed DynamoDB activity table, writes from trusted server routes such as `/api/chat`, reads scoped only from the signed NextAuth session, and replacing the admin-facing raw CloudWatch sidebar with persisted tenant-scoped structured app logs. Raw Amplify CloudWatch logs are app-level, so they are not safe as the durable tenant activity feed unless every event is structured, tenant-tagged, sanitized, and filtered server-side.
+
+**Status:** Implemented locally in stagewise commits on `worktree-tenant-llm-config`. The branch now defines the activity DynamoDB table/IAM/env wiring, persists authenticated chat turns and sanitized app logs from `/api/chat`, exposes a session-scoped `/api/activity` read API, hydrates chat/thinking/KB/admin activity-log UI from persisted activity, and includes tenant-isolation tests. Not pushed; no Amplify deploy triggered. Deployment still requires applying the Terraform table/IAM change and provisioning `DYNAMODB_ACTIVITY_TABLE` on the target Amplify app before pushing/deploying.
+
+## 2026-07-24 — Persistent activity history implemented
+
+**Context:** The durable activity-history design above needed to become actual app behavior without using raw app-level CloudWatch as the tenant-visible feed.
+
+**Decision:** Add `CustomerSupportAgent-Activity` as a tenant-keyed DynamoDB table with a `tenantUserId-createdAt-index`, expose `session.user.id`, write authenticated chat turns and sanitized `app_log` records from `/api/chat`, add `/api/activity` with tenant/user scoping, and hydrate `ChatArea`, `LeftSidebar`, and `RightSidebar` from persisted activity. The visible admin log tab is now an Activity Logs feed backed by tenant-scoped records instead of raw CloudWatch events. End users receive only `chat_turn` records from the activity API; admins can read tenant-wide activity and filter to same-tenant users.
+
+**Status:** Implemented locally and verified with typecheck, lint, and the full Vitest suite. Not pushed; no Amplify deploy triggered. Before live verification, apply/provision the new activity table and `DYNAMODB_ACTIVITY_TABLE` env var in the target Amplify environment.
+
+## 2026-07-24 — Persistent activity history deployed to preview
+
+**Context:** Pushing `worktree-tenant-llm-config` triggers Amplify deployment for preview app `d2l47euepvccx6`. The activity-history code required the new `CustomerSupportAgent-Activity` table, its `tenantUserId-createdAt-index`, IAM access for the existing service user, and `DYNAMODB_ACTIVITY_TABLE` in Amplify.
+
+**Decision:** Pushed the branch and let Amplify deploy commit `25d24e3`. Terraform was not applied from this worktree because the local state was not connected to the already-imported resources; `terraform plan` wanted to create 20 resources, not just the activity table. Instead, provisioned only the missing activity table via AWS CLI in `us-east-2`, enabled TTL on `expiresAt`, and updated the existing `DynamoDBTenantsUsersAccess` inline policy for `claude-qkstart-bedrock` to include the activity table and index ARNs. `DYNAMODB_ACTIVITY_TABLE=CustomerSupportAgent-Activity` was already present at the Amplify app level.
+
+**Status:** Amplify job 7 succeeded for `25d24e3`. `CustomerSupportAgent-Activity` and `tenantUserId-createdAt-index` are ACTIVE, TTL is enabled, the app homepage returns 200, and unauthenticated `/api/activity` returns 401 as expected.
+
+## 2026-07-24 — Activity history follow-up fixes
+
+**Context:** After deploying persistent activity history, three behavior gaps surfaced: the Knowledge Base sidebar showed only one source even when Bedrock retrieved multiple relevant chunks, Activity Logs appeared empty on normal successful chats, and the admin activity API exposed a partial/non-UI-backed path for browsing other users' chat records.
+
+**Decision:** Return up to the requested number of RAG sources from `retrieveContext()` instead of slicing to one. Write a sanitized `app_log` record for successful chat turns and guardrail blocks so the admin Activity Logs tab has tenant-scoped events without exposing chat text. Cut the partial admin chat-record browsing path from `/api/activity`: normal activity reads are scoped to the signed-in user's own chat records for both admins and end users, while admins can request `kind=app_log` for tenant-wide sanitized app logs.
+
+**Status:** Implemented locally and verified with typecheck, lint, and the full Vitest suite. Not pushed; no Amplify deploy triggered.
+
+## 2026-07-24 — Chat nav identity context
+
+**Context:** The chat screen should make the active actor and tenant obvious, especially while testing authenticated admin/end-user sessions versus anonymous embed-token sessions.
+
+**Decision:** Add a compact top-right identity block to `TopNavBar`. Authenticated sessions show the session name/email/id, role (`Admin` or `User`), and `session.user.tenantId`. Anonymous sessions show `Anon` and decode the tenant id from the same embed token source used by chat (`meta[name=tenant-token]`, `?t=`, or the development settings token).
+
+**Status:** Implemented locally and verified with typecheck and lint. Not pushed; no Amplify deploy triggered.
+
+## 2026-07-24 — Rich activity logs, message timestamps, and multi-document KB upload
+
+**Context:** Activity Logs were missing much of the lifecycle detail that still appeared in CloudWatch, chat messages had no durable timestamps, and `/admin/knowledge-base` only supported uploading a single file at a time.
+
+**Decision:** Add structured `app_log` records throughout `/api/chat` for request receipt, LLM config resolution, input/output guardrail checks, RAG retrieval, LLM generation, response parsing, and completion timing. Chat turns now persist separate user/assistant message timestamps and the chat UI renders them when hydrating from activity history. The knowledge-base admin upload UI now supports multi-file selection plus local folder selection, uploads every selected item, flattens S3 keys to sanitized filenames, and adds a six-character hash suffix only when a selected batch would otherwise collide after flattening.
+
+**Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck`, `npm run lint`, and `npm test`. Not pushed; no Amplify deploy triggered.
+
+## 2026-07-24 — Sidebar history ordering and scroll alignment
+
+**Context:** Chat history already rendered chronologically and stayed aligned to the latest message at the bottom, but Assistant Thinking and Knowledge Base history rendered newest-first at the top. Activity Logs also rendered newest-first but were auto-scrolled to the bottom, hiding the latest events.
+
+**Decision:** Render Assistant Thinking and Knowledge Base history chronologically by reversing the newest-first activity query slice and appending live updates, then scroll those panels to the bottom when content changes. Keep Activity Logs newest-first, but scroll them to the top so the latest tenant-scoped log records stay visible.
+
+**Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck`, `npm run lint`, and `npm test`. Not pushed; no Amplify deploy triggered.

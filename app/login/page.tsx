@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import { signIn, getSession } from "next-auth/react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { MaskedInput } from "@/components/ui/masked-input";
 import {
   Card,
   CardHeader,
@@ -88,13 +89,14 @@ function LoginForm() {
               <label htmlFor="password" className="text-sm font-medium">
                 Password
               </label>
-              <Input
+              <MaskedInput
                 id="password"
-                type="password"
                 autoComplete="current-password"
                 required
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
+                revealLabel="Show password"
+                hideLabel="Hide password"
               />
             </div>
             {error && <p className="text-sm text-destructive">{error}</p>}

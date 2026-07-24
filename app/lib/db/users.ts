@@ -1,9 +1,20 @@
-import { PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { ulid } from "ulid";
 import { ddbDocClient } from "./client";
 import { User } from "./schema";
 
 const TABLE_NAME = process.env.DYNAMODB_USERS_TABLE!;
+
+export async function getUserById(userId: string): Promise<User | null> {
+  const result = await ddbDocClient.send(
+    new GetCommand({
+      TableName: TABLE_NAME,
+      Key: { userId },
+    }),
+  );
+
+  return (result.Item as User) || null;
+}
 
 export async function getUserByEmail(
   tenantId: string,

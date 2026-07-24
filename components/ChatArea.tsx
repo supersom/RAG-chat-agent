@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useSession } from "next-auth/react";
 import config from "@/config";
 import { loadSettings } from "@/components/SettingsModal";
 import { getTenantToken } from "@/app/lib/tenant-client";
+import { parseModelList, type Model } from "@/app/lib/models";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import ReactMarkdown from "react-markdown";
@@ -184,16 +186,81 @@ const MessageContent = ({
   );
 };
 
-// Define a type for the model
-type Model = {
-  id: string;
-  name: string;
-};
-
 interface Message {
   id: string;
   role: string;
   content: string;
+  timestamp?: string;
+}
+
+function formatMessageTimestamp(timestamp?: string): string {
+  if (!timestamp) return "";
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+type ActivityRecord = {
+  activityId: string;
+  kind: "chat_turn" | "app_log";
+  chat?: {
+    userMessage: string;
+    userMessageCreatedAt?: string;
+    assistantMessage?: string;
+    assistantMessageCreatedAt?: string;
+    assistantThinking?: string;
+    userMood?: string;
+    suggestedQuestions?: string[];
+    matchedCategories?: string[];
+    redirectToAgent?: { shouldRedirect: boolean; reason?: string };
+  };
+  knowledgeBase?: { contextUsed: boolean };
+};
+
+function messagesFromActivities(activities: ActivityRecord[]): Message[] {
+  return [...activities]
+    .filter((activity) => activity.kind === "chat_turn" && activity.chat)
+    .reverse()
+    .flatMap((activity) => {
+      const chat = activity.chat!;
+      const assistantPayload = {
+        id: activity.activityId,
+        response: chat.assistantMessage || "",
+        thinking: chat.assistantThinking || "",
+        user_mood: chat.userMood || "neutral",
+        suggested_questions: chat.suggestedQuestions || [],
+        matched_categories: chat.matchedCategories || [],
+        redirect_to_agent: chat.redirectToAgent
+          ? {
+              should_redirect: chat.redirectToAgent.shouldRedirect,
+              reason: chat.redirectToAgent.reason,
+            }
+          : undefined,
+        debug: {
+          context_used: Boolean(activity.knowledgeBase?.contextUsed),
+        },
+      };
+
+      return [
+        {
+          id: `${activity.activityId}-user`,
+          role: "user",
+          content: chat.userMessage,
+          timestamp: chat.userMessageCreatedAt,
+        },
+        {
+          id: `${activity.activityId}-assistant`,
+          role: "assistant",
+          content: JSON.stringify(assistantPayload),
+          timestamp: chat.assistantMessageCreatedAt,
+        },
+      ];
+    });
 }
 
 // Define the props interface for ConversationHeader
@@ -286,6 +353,7 @@ const ConversationHeader: React.FC<ConversationHeaderProps> = ({
 );
 
 function ChatArea() {
+  const { data: session, status: sessionStatus } = useSession();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -294,12 +362,7 @@ function ChatArea() {
 
   const uiSettings = loadSettings();
   const modelsSource = uiSettings.models || process.env.NEXT_PUBLIC_MODELS || "claude-haiku-4-5-20251001:Claude Haiku 4.5";
-  const models: Model[] = modelsSource
-    .split(",")
-    .map((entry) => {
-      const [id, ...nameParts] = entry.trim().split(":");
-      return { id, name: nameParts.join(":") };
-    });
+  const models: Model[] = parseModelList(modelsSource);
 
   const [selectedModel, setSelectedModel] = useState(models[0]?.id ?? "claude-haiku-4-5-20251001");
   const [showAvatar, setShowAvatar] = useState(false);
@@ -312,6 +375,42 @@ function ChatArea() {
     { id: defaultKbId, name: "Som's KB" },
   ];
 
+
+  useEffect(() => {
+    if (sessionStatus === "loading") return;
+
+    if (sessionStatus !== "authenticated") {
+      setMessages([]);
+      setShowHeader(false);
+      setShowAvatar(false);
+      return;
+    }
+
+    let cancelled = false;
+    const loadActivity = async () => {
+      try {
+        const params = new URLSearchParams({ limit: "50" });
+        if (session?.user?.role === "admin" && session.user.id) {
+          params.set("userId", session.user.id);
+        }
+        const response = await fetch(`/api/activity?${params.toString()}`);
+        if (!response.ok) return;
+        const data = await response.json();
+        if (cancelled) return;
+        const hydratedMessages = messagesFromActivities(data.activities ?? []);
+        setMessages(hydratedMessages);
+        setShowHeader(hydratedMessages.length > 0);
+        setShowAvatar(hydratedMessages.length > 0);
+      } catch (error) {
+        console.error("Failed to hydrate chat activity:", error);
+      }
+    };
+
+    loadActivity();
+    return () => {
+      cancelled = true;
+    };
+  }, [session?.user?.id, session?.user?.role, sessionStatus]);
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
@@ -408,11 +507,13 @@ function ChatArea() {
       id: crypto.randomUUID(),
       role: "user",
       content: typeof event === "string" ? event : input,
+      timestamp: new Date().toISOString(),
     };
 
     const placeholderMessage = {
       id: crypto.randomUUID(),
       role: "assistant",
+      timestamp: new Date().toISOString(),
       content: JSON.stringify({
         response: "",
         thinking: "AI is processing...",
@@ -514,6 +615,7 @@ function ChatArea() {
         newMessages[lastIndex] = {
           id: crypto.randomUUID(),
           role: "assistant",
+          timestamp: new Date().toISOString(),
           content: JSON.stringify(data),
         };
         return newMessages;
@@ -545,6 +647,7 @@ function ChatArea() {
           message.id === placeholderMessage.id
             ? {
                 ...message,
+                timestamp: new Date().toISOString(),
                 content: JSON.stringify({
                   response:
                     "Sorry, something went wrong processing that message. Please try again.",
@@ -673,6 +776,17 @@ function ChatArea() {
                         content={message.content}
                         role={message.role}
                       />
+                      {formatMessageTimestamp(message.timestamp) && (
+                        <div
+                          className={`mt-2 text-[11px] ${
+                            message.role === "user"
+                              ? "text-primary-foreground/75"
+                              : "text-muted-foreground"
+                          }`}
+                        >
+                          {formatMessageTimestamp(message.timestamp)}
+                        </div>
+                      )}
                     </div>
                   </div>
                   {message.role === "assistant" && (
