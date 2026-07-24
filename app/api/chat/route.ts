@@ -4,6 +4,7 @@ import crypto from "crypto";
 import customerSupportCategories from "@/app/lib/customer_support_categories.json";
 import { resolveTenantContext, isTenantResolutionError } from "@/app/lib/tenant";
 import { applyGuardrail, GuardrailResult } from "@/app/lib/guardrails";
+import { resolveLlmConfig } from "@/app/lib/llm-config";
 
 // Debug message helper function
 // Input: message string and optional data object
@@ -91,13 +92,18 @@ export async function POST(req: Request) {
   }
   const tenant = tenantResult;
 
-  const allowedModels = tenant.llmProviderDefaults.allowedModels ?? [
-    tenant.llmProviderDefaults.model,
-  ];
+  const llmConfig = resolveLlmConfig(tenant.llmProviderDefaults, clientApiKey);
+  if (!llmConfig) {
+    return Response.json(
+      { error: "No LLM provider configured for this tenant" },
+      { status: 500 },
+    );
+  }
+
   const resolvedModel =
-    model && allowedModels.includes(model)
+    model && llmConfig.allowedModels.includes(model)
       ? model
-      : tenant.llmProviderDefaults.model;
+      : llmConfig.model;
 
   const latestMessage = messages[messages.length - 1].content;
 
@@ -292,22 +298,13 @@ export async function POST(req: Request) {
     ];
 
     const { completion } = await import("litellm");
-    // TEMPORARY: client-supplied key takes priority over server env vars
-    // while this deployment has no real server-side LLM credential
-    // configured. Not tenant-scoped — see BACKLOG.md, this needs removing
-    // once a real key is provisioned server-side.
-    const resolvedApiKey =
-      clientApiKey ||
-      process.env.OPENAI_API_KEY ||
-      process.env.ANTHROPIC_API_KEY ||
-      process.env.OPENROUTER_API_KEY;
 
     const response = await (completion as any)({
       model: resolvedModel,
       max_tokens: 1000,
       messages: litellmMessages,
       temperature: 0.3,
-      apiKey: resolvedApiKey,
+      apiKey: llmConfig.apiKey,
       response_format: { type: "json_object" },
     });
 
