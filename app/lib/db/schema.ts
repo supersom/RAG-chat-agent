@@ -31,6 +31,7 @@ export interface User {
 
 
 export type ActivityKind = "chat_turn" | "app_log";
+export type ActivityLlmProvider = LlmProvider | "unknown";
 
 export interface ActivityRecord {
   tenantId: string;
@@ -49,7 +50,7 @@ export interface ActivityRecord {
   chat?: {
     clientMessageId?: string;
     model: string;
-    provider: LlmProvider;
+    provider: ActivityLlmProvider;
     userMessage: string;
     assistantMessage?: string;
     assistantThinking?: string;

@@ -5,11 +5,136 @@ import customerSupportCategories from "@/app/lib/customer_support_categories.jso
 import { resolveTenantContext, isTenantResolutionError } from "@/app/lib/tenant";
 import { applyGuardrail, GuardrailResult } from "@/app/lib/guardrails";
 import { resolveLlmConfig } from "@/app/lib/llm-config";
+import { auth } from "@/auth";
+import { putAppLogActivity, putChatTurnActivity } from "@/app/lib/db/activity";
+import { ActivityLlmProvider } from "@/app/lib/db/schema";
 
 type ChatMessage = {
   role: "user" | "assistant" | "system";
   content: string;
 };
+
+type ActivityActor = {
+  tenantId: string;
+  userId: string;
+  userEmail?: string;
+  userRole: "admin" | "end_user";
+};
+
+function sanitizeActivityText(value: unknown, maxLength = 4000): string {
+  const text = value instanceof Error ? value.message : String(value ?? "");
+  return text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "").slice(0, maxLength);
+}
+
+async function persistChatActivity({
+  actor,
+  provider,
+  model,
+  userMessage,
+  assistantMessage,
+  assistantThinking,
+  userMood,
+  suggestedQuestions,
+  matchedCategories,
+  redirectToAgent,
+  contextUsed,
+  ragSources,
+  guardrail,
+}: {
+  actor: ActivityActor | null;
+  provider: ActivityLlmProvider;
+  model: string;
+  userMessage: string;
+  assistantMessage?: string;
+  assistantThinking?: string;
+  userMood?: string;
+  suggestedQuestions?: string[];
+  matchedCategories?: string[];
+  redirectToAgent?: { should_redirect: boolean; reason?: string };
+  contextUsed: boolean;
+  ragSources: RAGSource[];
+  guardrail?: { inputBlocked?: boolean; outputBlocked?: boolean };
+}) {
+  if (!actor) return;
+
+  try {
+    await putChatTurnActivity({
+      tenantId: actor.tenantId,
+      userId: actor.userId,
+      userEmail: actor.userEmail,
+      userRole: actor.userRole,
+      kind: "chat_turn",
+      chat: {
+        provider,
+        model,
+        userMessage: sanitizeActivityText(userMessage),
+        assistantMessage: assistantMessage
+          ? sanitizeActivityText(assistantMessage)
+          : undefined,
+        assistantThinking: assistantThinking
+          ? sanitizeActivityText(assistantThinking)
+          : undefined,
+        userMood,
+        suggestedQuestions,
+        matchedCategories,
+        redirectToAgent: redirectToAgent
+          ? {
+              shouldRedirect: redirectToAgent.should_redirect,
+              reason: redirectToAgent.reason
+                ? sanitizeActivityText(redirectToAgent.reason, 1000)
+                : undefined,
+            }
+          : undefined,
+        guardrail,
+      },
+      knowledgeBase: {
+        contextUsed,
+        sources: ragSources.map((source) => ({
+          id: sanitizeActivityText(source.id, 500),
+          fileName: sanitizeActivityText(source.fileName, 500),
+          snippet: sanitizeActivityText(source.snippet, 2000),
+          score: source.score,
+        })),
+      },
+    });
+  } catch (err) {
+    console.error("Failed to persist chat activity:", err);
+  }
+}
+
+async function persistAppLogActivity({
+  actor,
+  level,
+  message,
+  route,
+  metadata,
+}: {
+  actor: ActivityActor | null;
+  level: "debug" | "info" | "warn" | "error";
+  message: string;
+  route: string;
+  metadata?: Record<string, string | number | boolean | null>;
+}) {
+  if (!actor) return;
+
+  try {
+    await putAppLogActivity({
+      tenantId: actor.tenantId,
+      userId: actor.userId,
+      userEmail: actor.userEmail,
+      userRole: actor.userRole,
+      kind: "app_log",
+      appLog: {
+        level,
+        message: sanitizeActivityText(message, 1000),
+        route,
+        metadata,
+      },
+    });
+  } catch (err) {
+    console.error("Failed to persist app log activity:", err);
+  }
+}
 
 function normalizeOpenRouterModel(model: string): string {
   if (model === "auto" || model === "auto-beta") {
@@ -182,18 +307,41 @@ export async function POST(req: Request) {
     );
   }
   const tenant = tenantResult;
+  const session = await auth();
+  const actor: ActivityActor | null =
+    session?.user?.id && session.user.tenantId === tenant.tenantId
+      ? {
+          tenantId: session.user.tenantId,
+          userId: session.user.id,
+          userEmail: session.user.email ?? undefined,
+          userRole: session.user.role,
+        }
+      : null;
 
   let llmConfig;
   try {
     llmConfig = resolveLlmConfig(tenant.llmProviderDefaults, clientApiKey);
   } catch (err) {
     console.error("Failed to resolve LLM config:", err);
+    await persistAppLogActivity({
+      actor,
+      level: "error",
+      route: "/api/chat",
+      message: "Failed to resolve LLM provider configuration",
+      metadata: { error: sanitizeActivityText(err, 1000) },
+    });
     return Response.json(
       { error: "Failed to resolve LLM provider configuration" },
       { status: 500 },
     );
   }
   if (!llmConfig) {
+    await persistAppLogActivity({
+      actor,
+      level: "error",
+      route: "/api/chat",
+      message: "No LLM provider configured for this tenant",
+    });
     return Response.json(
       { error: "No LLM provider configured for this tenant" },
       { status: 500 },
@@ -232,30 +380,59 @@ export async function POST(req: Request) {
     });
   } catch (err) {
     console.error("Guardrail (input) call failed, failing closed:", err);
-    return Response.json(
-      {
-        id: crypto.randomUUID(),
-        response: "Sorry, I'm unable to process that request right now.",
-        thinking: "Guardrail check failed",
-        user_mood: "neutral",
-        suggested_questions: [],
-        debug: { context_used: false },
-      },
-      { status: 200 },
-    );
+    const guardrailFailureResponse = {
+      id: crypto.randomUUID(),
+      response: "Sorry, I'm unable to process that request right now.",
+      thinking: "Guardrail check failed",
+      user_mood: "neutral" as const,
+      suggested_questions: [],
+      debug: { context_used: false },
+    };
+    await persistAppLogActivity({
+      actor,
+      level: "error",
+      route: "/api/chat",
+      message: "Input guardrail call failed",
+      metadata: { error: sanitizeActivityText(err, 1000) },
+    });
+    await persistChatActivity({
+      actor,
+      provider: llmConfig.provider,
+      model: resolvedModel,
+      userMessage: latestMessage,
+      assistantMessage: guardrailFailureResponse.response,
+      assistantThinking: guardrailFailureResponse.thinking,
+      userMood: guardrailFailureResponse.user_mood,
+      suggestedQuestions: guardrailFailureResponse.suggested_questions,
+      contextUsed: false,
+      ragSources: [],
+      guardrail: { inputBlocked: true },
+    });
+    return Response.json(guardrailFailureResponse, { status: 200 });
   }
   if (inputGuardrail.blocked) {
-    return Response.json(
-      {
-        id: crypto.randomUUID(),
-        response: inputGuardrail.outputText,
-        thinking: "Blocked by guardrail",
-        user_mood: "neutral",
-        suggested_questions: [],
-        debug: { context_used: false },
-      },
-      { status: 200 },
-    );
+    const blockedResponse = {
+      id: crypto.randomUUID(),
+      response: inputGuardrail.outputText,
+      thinking: "Blocked by guardrail",
+      user_mood: "neutral" as const,
+      suggested_questions: [],
+      debug: { context_used: false },
+    };
+    await persistChatActivity({
+      actor,
+      provider: llmConfig.provider,
+      model: resolvedModel,
+      userMessage: latestMessage,
+      assistantMessage: blockedResponse.response,
+      assistantThinking: blockedResponse.thinking,
+      userMood: blockedResponse.user_mood,
+      suggestedQuestions: blockedResponse.suggested_questions,
+      contextUsed: false,
+      ragSources: [],
+      guardrail: { inputBlocked: true },
+    });
+    return Response.json(blockedResponse, { status: 200 });
   }
 
   // Initialize variables for RAG retrieval
@@ -290,6 +467,13 @@ export async function POST(req: Request) {
   } catch (error) {
     console.error("💀 RAG Error:", error);
     console.error("❌ RAG retrieval failed for query:", latestMessage);
+    await persistAppLogActivity({
+      actor,
+      level: "error",
+      route: "/api/chat",
+      message: "RAG retrieval failed",
+      metadata: { error: sanitizeActivityText(error, 1000) },
+    });
     retrievedContext = "";
     isRagWorking = false;
     ragSources = [];
@@ -419,6 +603,7 @@ export async function POST(req: Request) {
     }
 
     const validatedResponse = responseSchema.parse(parsedResponse);
+    let outputGuardrailBlocked = false;
 
     // Screen the output with the guardrail. Fails open: an error calling
     // the guardrail does not block an already-generated response.
@@ -431,10 +616,18 @@ export async function POST(req: Request) {
         credentials: tenant.awsCredentials,
       });
       if (outputGuardrail.blocked) {
+        outputGuardrailBlocked = true;
         validatedResponse.response = outputGuardrail.outputText;
       }
     } catch (err) {
       console.error("Guardrail (output) call failed, failing open:", err);
+      await persistAppLogActivity({
+        actor,
+        level: "error",
+        route: "/api/chat",
+        message: "Output guardrail call failed",
+        metadata: { error: sanitizeActivityText(err, 1000) },
+      });
     }
 
     const responseWithId = {
@@ -447,6 +640,22 @@ export async function POST(req: Request) {
       console.log("🚨 AGENT REDIRECT TRIGGERED!");
       console.log("Reason:", responseWithId.redirect_to_agent.reason);
     }
+
+    await persistChatActivity({
+      actor,
+      provider: llmConfig.provider,
+      model: resolvedModel,
+      userMessage: latestMessage,
+      assistantMessage: responseWithId.response,
+      assistantThinking: responseWithId.thinking,
+      userMood: responseWithId.user_mood,
+      suggestedQuestions: responseWithId.suggested_questions,
+      matchedCategories: responseWithId.matched_categories,
+      redirectToAgent: responseWithId.redirect_to_agent,
+      contextUsed: responseWithId.debug.context_used,
+      ragSources,
+      guardrail: { outputBlocked: outputGuardrailBlocked },
+    });
 
     // Prepare the response object
     const apiResponse = new Response(JSON.stringify(responseWithId), {
@@ -477,9 +686,27 @@ export async function POST(req: Request) {
       response:
         "Sorry, there was an issue processing your request. Please try again later.",
       thinking: "Error occurred during message generation.",
-      user_mood: "neutral",
+      user_mood: "neutral" as const,
       debug: { context_used: false },
     };
+    await persistAppLogActivity({
+      actor,
+      level: "error",
+      route: "/api/chat",
+      message: "Message generation failed",
+      metadata: { error: sanitizeActivityText(error, 1000) },
+    });
+    await persistChatActivity({
+      actor,
+      provider: llmConfig.provider,
+      model: resolvedModel,
+      userMessage: latestMessage,
+      assistantMessage: errorResponse.response,
+      assistantThinking: errorResponse.thinking,
+      userMood: errorResponse.user_mood,
+      contextUsed: false,
+      ragSources,
+    });
     return new Response(JSON.stringify(errorResponse), {
       status: 500,
       headers: { "Content-Type": "application/json" },

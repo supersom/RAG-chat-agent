@@ -1,10 +1,10 @@
 // app/lib/llm-config.ts
-import { Tenant } from "@/app/lib/db/schema";
+import { ActivityLlmProvider, Tenant } from "@/app/lib/db/schema";
 import { decryptApiKey } from "@/app/lib/tenant-secrets";
 import { parseModelList } from "@/app/lib/models";
 
 export type LlmConfig = {
-  provider: string;
+  provider: ActivityLlmProvider;
   apiKey: string;
   model: string;
   allowedModels: string[];
