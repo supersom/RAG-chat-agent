@@ -24,6 +24,40 @@ Branch `stage` (`NONE` vs `PRODUCTION`) was tested as a hypothesis for the origi
 
 **Status:** Both fixes deployed and verified live on `d2l47euepvccx6` (https://worktree-auth-multitenancy-guardrails.d2l47euepvccx6.amplifyapp.com). Signup → auto-login → session all confirmed working end-to-end. Remaining manual QA checklist (cross-tenant isolation, guardrail trigger test, `requireEndUserAuth` toggle, etc.) is now unblocked — see `BACKLOG.md` in the project memory directory.
 
+## 2026-07-23 20:10 — Manual QA checklist executed against the preview deployment
+
+**Decision:** Run all 10 original checklist items plus 5 follow-up items (logout button, OpenAI default, tenant Users feature) live against `d2l47euepvccx6`, rather than relying on code review alone, before considering the branch mergeable.
+
+**Reasoning:** The branch had been code-reviewed clean but never exercised against real deployed infrastructure — the two Amplify platform bugs above were proof that code-level correctness and deployment correctness are different questions here. All 15 items passed (full results, screenshots, and methodology in `docs/qa-results-2026-07-23.md`), including the two tests specifically designed to re-validate earlier-session bugs under real conditions rather than just in code: cross-tenant isolation under genuine concurrency (two real concurrent `/api/chat` calls, ~19ms apart, zero cross-contamination — re-validates the original `process.env` global-mutation credential leak is fixed), and a fresh tenant with an empty `guardrailId` successfully chatting (re-validates the final-review fix that stops "no guardrail configured yet" from being treated as an AWS error). Three non-blocking issues were found and are tracked separately: a placeholder `ANTHROPIC_API_KEY` on this preview deployment (blocks any test needing a full LLM completion), one tenant record with unexplained malformed defaults, and (at the time) no working logout mechanism.
+
+**Status:** Complete. The one genuine follow-up — logout redirecting to `localhost:3000` instead of the real Amplify domain because `AUTH_URL` was never set — was root-caused (Auth.js needs `AUTH_URL` for constructing *outgoing* redirect URLs, separate from the `trustHost` fix which only governs *incoming* host trust) and fixed by baking `AUTH_URL=https://${AWS_BRANCH}.${AWS_APP_ID}.amplifyapp.com` into `.env.production` in `amplify.yml`, using Amplify's own build variables so the fix isn't hardcoded to one app. This shipped and has been through many subsequent deploys; the underlying login/logout cycle has worked repeatedly in later sessions, but no separate formal re-run of QA item 11 specifically was written up after the fix.
+
+## 2026-07-23 20:10 — End-user login flow, chat error states, and the login/signup navigation race
+
+Three related UX bugs found and fixed while exercising the login/signup flow manually; grouping them here since they compound into "auth sometimes silently does nothing."
+
+### No login surface for end users, and no visible error when chat fails
+
+**Decision:** Move login from `/admin/login` to `/login` (taking an optional `?callbackUrl=`) so the same page serves both admin and end-user sign-in; make `ChatArea.tsx` show a "Please sign in to continue chatting" prompt (linking to `/login?callbackUrl=<current chat URL>`) instead of silently failing when `resolveTenantContext` returns "Authentication required."
+
+**Reasoning:** Tenants with `requireEndUserAuth: true` had no way for an end user to actually log in — only `/admin/login` existed, and it was gated to admin-only sign-in. Separately, `ChatArea.tsx`'s `handleSubmit` left the optimistic "Thinking..." placeholder message stuck forever on any request failure (the `catch` block only did `console.error`, never updated the UI), so a 401 for "not logged in" looked identical to the app being frozen. Fixed both together: the 401-with-"Authentication required" case now removes the placeholder and shows a dedicated sign-in banner; every other failure path now replaces the placeholder with a visible error message instead of leaving it stuck.
+
+### Login/signup sometimes did nothing on a genuinely successful sign-in
+
+**Decision:** Replace `router.push(...)` with `window.location.href = ...` after a successful `signIn()` in both `app/admin/signup/page.tsx` and `app/login/page.tsx`.
+
+**Reasoning:** `router.push` is a Next.js App Router *soft* navigation, which can race the just-set session cookie — `middleware.ts`'s auth check sometimes ran before the cookie was visible to it and silently redirected back to the login page, with no error shown (the login code itself never entered its error branch, since `signIn()` had genuinely succeeded). Confirmed via direct `/api/auth/session` checks that the session was valid both server- and client-side even on runs where the redirect silently failed — proving it was a timing race, not an auth failure. A hard navigation forces a fresh request cycle guaranteed to include the cookie.
+
+A related follow-up surfaced once this worked: `/login?callbackUrl=%2Fadmin` was looping non-admin (`end_user`-role) sessions, since the callback blindly navigated to whatever `callbackUrl` middleware had set regardless of the signed-in user's role. Fixed by checking the session's role client-side before navigating to an `/admin`-prefixed callback — a non-admin session is redirected to `/` (the chat) instead of bouncing back to `/login` in a loop or showing a "doesn't have admin access" error (the latter was the first fix attempted; changed to a silent redirect per explicit product feedback that an end-user hitting an admin-only callback should just land in the chat they can actually use, not see an error about a page they were never trying to reach).
+
+**Status:** All three shipped, verified via the manual QA checklist above (items 1–4) and via repeated live login/logout cycles in later sessions.
+
+## 2026-07-23 20:10 — Guardrails-only, no separate custom guardrail layer (design decision)
+
+**Decision:** Use Bedrock Guardrails as the sole content/prompt-injection screening layer for this phase; no additional provider-agnostic custom guardrail code (rate limiting, extra prompt-injection delimiting around RAG content) was built.
+
+**Reasoning:** Bedrock Guardrails screens text (both input and output) regardless of which LLM actually generated the response, so it works uniformly across the multi-provider `llmProviderDefaults` setup (OpenAI, Anthropic, OpenRouter) without per-provider integration work. A custom layer remains a reasonable future addition if a specific gap in Bedrock's coverage is identified, but wasn't needed to ship this phase.
+
 ## 2026-07-24 — Merging to `main` broke production login: env vars provisioned for preview never reached prod
 
 **Context:** PR #1 merged and auto-deployed to `main`, which is production (`kbsearch.somdutta.com`, Amplify app `d23lox37qr16rj`) — a different app from the preview used throughout the QA work above. Admin login on production immediately started failing with Auth.js's generic "Server error: There is a problem with the server configuration" page.
