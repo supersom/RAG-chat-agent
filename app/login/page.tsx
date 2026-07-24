@@ -2,7 +2,7 @@
 
 import { Suspense, useState, type FormEvent } from "react";
 import { useSearchParams } from "next/navigation";
-import { signIn } from "next-auth/react";
+import { signIn, getSession } from "next-auth/react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -39,6 +39,14 @@ function LoginForm() {
     if (!result || result.error) {
       setError("Invalid email or password.");
       return;
+    }
+
+    if (callbackUrl.startsWith("/admin")) {
+      const session = await getSession();
+      if (session?.user.role !== "admin") {
+        setError("This account doesn't have admin access.");
+        return;
+      }
     }
 
     // Hard navigation, not router.push: a client-side soft navigation can
