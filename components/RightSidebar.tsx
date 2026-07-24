@@ -63,9 +63,7 @@ const POLL_INTERVAL_MS = 5000;
 
 const RightSidebar: React.FC = () => {
   const { data: session } = useSession();
-  const isDev =
-    loadSettings().nodeEnv === "development" &&
-    session?.user?.role === "admin";
+  const canViewLogs = session?.user?.role === "admin";
   const [activeTab, setActiveTab] = useState<"kb" | "logs">("kb");
 
   // KB history state
@@ -185,7 +183,7 @@ const RightSidebar: React.FC = () => {
             >
               Knowledge Base
             </button>
-            {isDev && (
+            {canViewLogs && (
               <button
                 className={`text-sm font-medium pb-2 border-b-2 transition-colors ${
                   activeTab === "logs"
@@ -252,7 +250,7 @@ const RightSidebar: React.FC = () => {
             </>
           )}
 
-          {isDev && activeTab === "logs" && (
+          {canViewLogs && activeTab === "logs" && (
             <div className="flex flex-col gap-1">
               {logsError && (
                 <div className="text-xs text-red-500 mb-2">Error: {logsError}</div>

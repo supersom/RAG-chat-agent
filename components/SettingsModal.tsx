@@ -20,7 +20,6 @@ export type AppSettings = {
   bawsSecretAccessKey: string;
   models: string;
   knowledgeBaseId: string;
-  nodeEnv: string;
   tenantToken?: string;
 };
 
@@ -40,7 +39,6 @@ function emptySettings(): AppSettings {
     bawsSecretAccessKey: "",
     models: "",
     knowledgeBaseId: "",
-    nodeEnv: "",
     tenantToken: "",
   };
 }
@@ -194,18 +192,6 @@ export default function SettingsModal() {
               </div>
             </div>
           )}
-
-          <label className="flex items-center gap-2 cursor-pointer w-fit">
-            <input
-              type="checkbox"
-              checked={form.nodeEnv === "development"}
-              onChange={(e) =>
-                setForm((f) => ({ ...f, nodeEnv: e.target.checked ? "development" : "" }))
-              }
-              className="h-4 w-4 accent-primary"
-            />
-            <span className="text-sm font-medium">Development mode</span>
-          </label>
 
           <div className="flex items-center justify-between">
             <p className="text-xs text-muted-foreground">
