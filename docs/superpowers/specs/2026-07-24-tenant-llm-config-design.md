@@ -32,10 +32,16 @@ API with the wrong credential shape):
    priority order used today), with `model`/`allowedModels` parsed from
    `NEXT_PUBLIC_MODELS`.
 3. **Client-supplied key** — the existing dev-only Settings-modal key,
-   used only if neither tier above has a key. Gated server-side to
-   non-production (`NODE_ENV !== "production"`), not just hidden in the UI as
-   today — closes the gap where a crafted request could smuggle a key into a
-   production deployment that's simply missing its own configuration.
+   used only if neither tier above has a key. Gated server-side on
+   `NEXT_PUBLIC_APP_ENV === "development"` — the same flag that already
+   gates the Settings-modal UI (`SettingsModal.tsx`), not just hidden in the
+   client as today. Deliberately **not** gated on `NODE_ENV`: `NODE_ENV` is
+   always `"production"` for any `next build`, including this repo's own
+   preview Amplify deployments (verified against app `d2l47euepvccx6`, which
+   sets `NEXT_PUBLIC_APP_ENV=development` while running a real production
+   build) — gating on `NODE_ENV` would make tier 3 permanently unreachable
+   everywhere, defeating the purpose of the preview/test escape hatch this
+   tier exists for.
 
 A tenant's LLM config is all-or-nothing: if an admin sets an API key, they
 must also set provider and model in the same saved state, otherwise the
