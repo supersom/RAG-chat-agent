@@ -5,7 +5,6 @@ import { useSession } from "next-auth/react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { FileIcon, MessageCircleIcon } from "lucide-react";
 import FullSourceModal from "./FullSourceModal";
-import { loadSettings } from "@/components/SettingsModal";
 
 interface RAGSource {
   id: string;
@@ -19,6 +18,7 @@ interface RAGHistoryItem {
   sources: RAGSource[];
   timestamp: string;
   query: string;
+  userLabel?: string;
 }
 
 interface DebugInfo {
@@ -33,9 +33,66 @@ interface SidebarEvent {
 }
 
 interface LogEvent {
+  id: string;
   timestamp?: number;
   message?: string;
-  logStreamName?: string;
+  userLabel?: string;
+  level?: "debug" | "info" | "warn" | "error";
+}
+
+type ActivityRecord = {
+  activityId: string;
+  kind: "chat_turn" | "app_log";
+  createdAt: string;
+  userEmail?: string;
+  userId: string;
+  chat?: { userMessage: string };
+  knowledgeBase?: { contextUsed: boolean; sources: RAGSource[] };
+  appLog?: {
+    level: "debug" | "info" | "warn" | "error";
+    message: string;
+    route?: string;
+  };
+};
+
+function userLabel(activity: Pick<ActivityRecord, "userEmail" | "userId">): string {
+  return activity.userEmail || activity.userId;
+}
+
+function ragHistoryFromActivities(activities: ActivityRecord[]): RAGHistoryItem[] {
+  return activities
+    .filter(
+      (activity) =>
+        activity.kind === "chat_turn" &&
+        activity.knowledgeBase?.contextUsed &&
+        activity.knowledgeBase.sources.length > 0,
+    )
+    .slice(0, MAX_HISTORY)
+    .map((activity) => ({
+      sources: activity.knowledgeBase!.sources.map((source) => ({
+        ...source,
+        snippet: source.snippet || "No preview available",
+        fileName:
+          (source.fileName || "").replace(/_/g, " ").replace(".txt", "") ||
+          "Unnamed",
+        timestamp: activity.createdAt,
+      })),
+      timestamp: activity.createdAt,
+      query: activity.chat?.userMessage || "Unknown query",
+      userLabel: userLabel(activity),
+    }));
+}
+
+function logEventsFromActivities(activities: ActivityRecord[]): LogEvent[] {
+  return activities
+    .filter((activity) => activity.kind === "app_log" && activity.appLog)
+    .map((activity) => ({
+      id: activity.activityId,
+      timestamp: Date.parse(activity.createdAt),
+      level: activity.appLog!.level,
+      userLabel: userLabel(activity),
+      message: `${activity.appLog!.route || "app"}: ${activity.appLog!.message}`,
+    }));
 }
 
 const truncateSnippet = (text: string): string => {
@@ -55,9 +112,6 @@ const getLogColor = (message: string): string => {
   return "text-foreground";
 };
 
-const LAMBDA_NOISE = /^(START RequestId:|END RequestId:|REPORT RequestId:|Starting request using compute)/;
-const isAppLog = (message: string) => !LAMBDA_NOISE.test(message);
-
 const MAX_HISTORY = 15;
 const POLL_INTERVAL_MS = 5000;
 
@@ -75,8 +129,43 @@ const RightSidebar: React.FC = () => {
   const [logs, setLogs] = useState<LogEvent[]>([]);
   const [logsError, setLogsError] = useState<string | null>(null);
   const [logsLoading, setLogsLoading] = useState(false);
-  const lastTimestampRef = useRef<number>(Date.now() - 10 * 60 * 1000);
   const logsEndRef = useRef<HTMLDivElement>(null);
+
+
+  useEffect(() => {
+    if (session?.user) return;
+    setRagHistory([]);
+    setLogs([]);
+  }, [session?.user]);
+
+  useEffect(() => {
+    if (!session?.user) return;
+
+    let cancelled = false;
+    const loadActivity = async () => {
+      try {
+        const response = await fetch("/api/activity?limit=100");
+        if (!response.ok) return;
+        const data = await response.json();
+        if (cancelled) return;
+        const activities: ActivityRecord[] = data.activities ?? [];
+        setRagHistory(ragHistoryFromActivities(activities));
+        if (canViewLogs) {
+          setLogs(logEventsFromActivities(activities));
+          setLogsError(null);
+        }
+      } catch (error: any) {
+        if (canViewLogs) {
+          setLogsError(error.message);
+        }
+      }
+    };
+
+    loadActivity();
+    return () => {
+      cancelled = true;
+    };
+  }, [canViewLogs, session?.user]);
 
   useEffect(() => {
     const updateRAGSources = (
@@ -116,44 +205,36 @@ const RightSidebar: React.FC = () => {
   useEffect(() => {
     if (!canViewLogs || activeTab !== "logs") return;
 
-    const settings = loadSettings();
-
+    let cancelled = false;
     const fetchLogs = async () => {
       setLogsLoading(true);
       try {
-        const res = await fetch("/api/logs", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            bawsAccessKeyId: settings.bawsAccessKeyId || undefined,
-            bawsSecretAccessKey: settings.bawsSecretAccessKey || undefined,
-            startTime: lastTimestampRef.current,
-          }),
-        });
+        const res = await fetch("/api/activity?limit=100");
         const data = await res.json();
+        if (cancelled) return;
         if (data.error) {
           setLogsError(data.error);
         } else {
-          const newEvents: LogEvent[] = (data.events ?? []).filter(
-            (e: LogEvent) => isAppLog(e.message ?? "")
-          );
-          if (newEvents.length > 0) {
-            const maxTs = Math.max(...newEvents.map((e) => e.timestamp ?? 0));
-            lastTimestampRef.current = maxTs + 1;
-            setLogs((prev) => [...prev, ...newEvents].slice(-500));
-            setLogsError(null);
-          }
+          setLogs(logEventsFromActivities(data.activities ?? []));
+          setLogsError(null);
         }
       } catch (e: any) {
-        setLogsError(e.message);
+        if (!cancelled) {
+          setLogsError(e.message);
+        }
       } finally {
-        setLogsLoading(false);
+        if (!cancelled) {
+          setLogsLoading(false);
+        }
       }
     };
 
     fetchLogs();
     const interval = setInterval(fetchLogs, POLL_INTERVAL_MS);
-    return () => clearInterval(interval);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
   }, [activeTab, canViewLogs]);
 
   useEffect(() => {
@@ -198,7 +279,7 @@ const RightSidebar: React.FC = () => {
                 }`}
                 onClick={() => setActiveTab("logs")}
               >
-                CloudWatch Logs
+                Activity Logs
               </button>
             )}
           </div>
@@ -220,6 +301,9 @@ const RightSidebar: React.FC = () => {
                 >
                   <div className="flex items-center text-xs text-muted-foreground mb-2 gap-1">
                     <MessageCircleIcon size={14} className="text-muted-foreground" />
+                    {historyItem.userLabel && (
+                      <span className="font-medium">{historyItem.userLabel}</span>
+                    )}
                     <span>{historyItem.query}</span>
                   </div>
                   {historyItem.sources.map((source, sourceIndex) => (
@@ -263,7 +347,7 @@ const RightSidebar: React.FC = () => {
               )}
               {logs.length === 0 && !logsLoading && !logsError && (
                 <div className="text-sm text-muted-foreground">
-                  No logs in the last 10 minutes. Polling every 5s…
+                  No persisted activity logs yet. Polling every 5s.
                 </div>
               )}
               {logs.map((event, i) => (
@@ -273,6 +357,11 @@ const RightSidebar: React.FC = () => {
                       ? new Date(event.timestamp).toLocaleTimeString()
                       : ""}
                   </span>
+                  {event.userLabel && (
+                    <span className="text-muted-foreground mr-2">
+                      {event.userLabel}
+                    </span>
+                  )}
                   <span className={getLogColor(event.message ?? "")}>
                     {event.message ?? ""}
                   </span>

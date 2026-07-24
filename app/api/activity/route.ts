@@ -6,6 +6,7 @@ import {
 import { getUserById } from "@/app/lib/db/users";
 import {
   ActivityAccessError,
+  filterVisibleActivitiesForRole,
   resolveActivityReadScope,
 } from "@/app/lib/activity-scope";
 
@@ -56,7 +57,9 @@ export async function GET(req: Request) {
             before,
           });
 
-    return Response.json({ activities });
+    return Response.json({
+      activities: filterVisibleActivitiesForRole(session.user.role, activities),
+    });
   } catch (err) {
     if (err instanceof ActivityAccessError) {
       return Response.json({ error: err.message }, { status: err.status });

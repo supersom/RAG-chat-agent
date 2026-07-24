@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useSession } from "next-auth/react";
 import config from "@/config";
 import { loadSettings } from "@/components/SettingsModal";
 import { getTenantToken } from "@/app/lib/tenant-client";
@@ -191,6 +192,60 @@ interface Message {
   content: string;
 }
 
+type ActivityRecord = {
+  activityId: string;
+  kind: "chat_turn" | "app_log";
+  chat?: {
+    userMessage: string;
+    assistantMessage?: string;
+    assistantThinking?: string;
+    userMood?: string;
+    suggestedQuestions?: string[];
+    matchedCategories?: string[];
+    redirectToAgent?: { shouldRedirect: boolean; reason?: string };
+  };
+  knowledgeBase?: { contextUsed: boolean };
+};
+
+function messagesFromActivities(activities: ActivityRecord[]): Message[] {
+  return [...activities]
+    .filter((activity) => activity.kind === "chat_turn" && activity.chat)
+    .reverse()
+    .flatMap((activity) => {
+      const chat = activity.chat!;
+      const assistantPayload = {
+        id: activity.activityId,
+        response: chat.assistantMessage || "",
+        thinking: chat.assistantThinking || "",
+        user_mood: chat.userMood || "neutral",
+        suggested_questions: chat.suggestedQuestions || [],
+        matched_categories: chat.matchedCategories || [],
+        redirect_to_agent: chat.redirectToAgent
+          ? {
+              should_redirect: chat.redirectToAgent.shouldRedirect,
+              reason: chat.redirectToAgent.reason,
+            }
+          : undefined,
+        debug: {
+          context_used: Boolean(activity.knowledgeBase?.contextUsed),
+        },
+      };
+
+      return [
+        {
+          id: `${activity.activityId}-user`,
+          role: "user",
+          content: chat.userMessage,
+        },
+        {
+          id: `${activity.activityId}-assistant`,
+          role: "assistant",
+          content: JSON.stringify(assistantPayload),
+        },
+      ];
+    });
+}
+
 // Define the props interface for ConversationHeader
 interface ConversationHeaderProps {
   selectedModel: string;
@@ -281,6 +336,7 @@ const ConversationHeader: React.FC<ConversationHeaderProps> = ({
 );
 
 function ChatArea() {
+  const { data: session, status: sessionStatus } = useSession();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -302,6 +358,42 @@ function ChatArea() {
     { id: defaultKbId, name: "Som's KB" },
   ];
 
+
+  useEffect(() => {
+    if (sessionStatus === "loading") return;
+
+    if (sessionStatus !== "authenticated") {
+      setMessages([]);
+      setShowHeader(false);
+      setShowAvatar(false);
+      return;
+    }
+
+    let cancelled = false;
+    const loadActivity = async () => {
+      try {
+        const params = new URLSearchParams({ limit: "50" });
+        if (session?.user?.role === "admin" && session.user.id) {
+          params.set("userId", session.user.id);
+        }
+        const response = await fetch(`/api/activity?${params.toString()}`);
+        if (!response.ok) return;
+        const data = await response.json();
+        if (cancelled) return;
+        const hydratedMessages = messagesFromActivities(data.activities ?? []);
+        setMessages(hydratedMessages);
+        setShowHeader(hydratedMessages.length > 0);
+        setShowAvatar(hydratedMessages.length > 0);
+      } catch (error) {
+        console.error("Failed to hydrate chat activity:", error);
+      }
+    };
+
+    loadActivity();
+    return () => {
+      cancelled = true;
+    };
+  }, [session?.user?.id, session?.user?.role, sessionStatus]);
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };

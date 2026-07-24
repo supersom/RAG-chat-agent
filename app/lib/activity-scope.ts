@@ -1,4 +1,4 @@
-import { User } from "@/app/lib/db/schema";
+import { ActivityRecord, User } from "@/app/lib/db/schema";
 
 export type ActivitySessionUser = {
   id: string;
@@ -53,4 +53,13 @@ export function resolveActivityReadScope({
     tenantId: sessionUser.tenantId,
     userId: requestedUser.userId,
   };
+}
+
+
+export function filterVisibleActivitiesForRole(
+  role: "admin" | "end_user",
+  activities: ActivityRecord[],
+): ActivityRecord[] {
+  if (role === "admin") return activities;
+  return activities.filter((activity) => activity.kind === "chat_turn");
 }

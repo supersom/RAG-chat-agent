@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { ActivityAccessError, resolveActivityReadScope } from "./activity-scope";
+import { ActivityRecord } from "./db/schema";
+import {
+  ActivityAccessError,
+  filterVisibleActivitiesForRole,
+  resolveActivityReadScope,
+} from "./activity-scope";
 
 describe("resolveActivityReadScope", () => {
   it("scopes end users to their own tenant/user key", () => {
@@ -53,5 +58,23 @@ describe("resolveActivityReadScope", () => {
         requestedUser: { userId: "user-b", tenantId: "tenant-b" },
       }),
     ).toThrow(new ActivityAccessError(404, "User not found"));
+  });
+});
+
+
+describe("filterVisibleActivitiesForRole", () => {
+  const activities = [
+    { kind: "chat_turn", activityId: "chat" },
+    { kind: "app_log", activityId: "log" },
+  ] as ActivityRecord[];
+
+  it("keeps app logs visible to admins", () => {
+    expect(filterVisibleActivitiesForRole("admin", activities)).toEqual(activities);
+  });
+
+  it("hides app logs from end users", () => {
+    expect(filterVisibleActivitiesForRole("end_user", activities)).toEqual([
+      activities[0],
+    ]);
   });
 });

@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
+import { useSession } from "next-auth/react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import {
   User,
@@ -22,6 +23,34 @@ interface ThinkingContent {
   debug?: {
     context_used: boolean;
   };
+  user_label?: string;
+}
+
+type ActivityRecord = {
+  activityId: string;
+  kind: "chat_turn" | "app_log";
+  userEmail?: string;
+  userId: string;
+  chat?: {
+    assistantThinking?: string;
+    userMood?: string;
+    matchedCategories?: string[];
+  };
+  knowledgeBase?: { contextUsed: boolean };
+};
+
+function thinkingFromActivities(activities: ActivityRecord[]): ThinkingContent[] {
+  return activities
+    .filter((activity) => activity.kind === "chat_turn" && activity.chat?.assistantThinking)
+    .slice(0, MAX_THINKING_HISTORY)
+    .map((activity) => ({
+      id: activity.activityId,
+      content: activity.chat!.assistantThinking!,
+      user_mood: activity.chat?.userMood,
+      matched_categories: activity.chat?.matchedCategories,
+      debug: { context_used: Boolean(activity.knowledgeBase?.contextUsed) },
+      user_label: activity.userEmail || activity.userId,
+    }));
 }
 
 const getDebugPillColor = (value: boolean): string => {
@@ -45,9 +74,38 @@ const getMoodColor = (mood: string): string => {
 const MAX_THINKING_HISTORY = 15;
 
 const LeftSidebar: React.FC = () => {
+  const { status: sessionStatus } = useSession();
   const [thinkingContents, setThinkingContents] = useState<ThinkingContent[]>(
     [],
   );
+
+
+  useEffect(() => {
+    if (sessionStatus === "loading") return;
+    if (sessionStatus !== "authenticated") {
+      setThinkingContents([]);
+      return;
+    }
+
+    let cancelled = false;
+    const loadActivity = async () => {
+      try {
+        const response = await fetch("/api/activity?limit=50");
+        if (!response.ok) return;
+        const data = await response.json();
+        if (!cancelled) {
+          setThinkingContents(thinkingFromActivities(data.activities ?? []));
+        }
+      } catch (error) {
+        console.error("Failed to hydrate thinking activity:", error);
+      }
+    };
+
+    loadActivity();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionStatus]);
 
   useEffect(() => {
     const handleUpdateSidebar = (event: CustomEvent<ThinkingContent>) => {
@@ -117,6 +175,11 @@ const LeftSidebar: React.FC = () => {
                 }}
               >
                 <CardContent className="py-4">
+                  {content.user_label && (
+                    <div className="text-xs text-muted-foreground mb-2">
+                      {content.user_label}
+                    </div>
+                  )}
                   <div className="text-sm text-muted-foreground">
                     {content.content}
                   </div>
