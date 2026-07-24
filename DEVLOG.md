@@ -123,3 +123,11 @@ While drafting the plan's deployment task, I quoted the live output of `aws ampl
 **Decision:** When the client session resolves to an admin user, automatically switch the right sidebar to the CloudWatch Logs tab and make the polling effect depend on `canViewLogs` as well as the active tab. This starts polling only after the admin session is known, and keeps non-admin users from polling the admin-only endpoint.
 
 **Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck` and `npm run lint`. Not pushed; no Amplify deploy triggered.
+
+## 2026-07-24 — Masked fields now have reveal controls
+
+**Context:** Password and API-key inputs should be maskable by default but inspectable by the user when needed. `SettingsModal.tsx` already had a local secret-field eye toggle, but login/signup/admin-user password fields and the tenant LLM API-key field did not.
+
+**Decision:** Add a reusable `components/ui/masked-input.tsx` control with `Eye`/`EyeOff` toggling, then use it for login password, admin signup password, admin user creation password, tenant API key, and the existing settings modal secret fields.
+
+**Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck` and `npm run lint`. Not pushed; no Amplify deploy triggered.

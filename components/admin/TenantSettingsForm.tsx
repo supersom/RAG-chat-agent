@@ -3,6 +3,7 @@
 import { useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { MaskedInput } from "@/components/ui/masked-input";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Card,
@@ -215,9 +216,8 @@ export default function TenantSettingsForm({
             <label htmlFor="apiKey" className="text-sm font-medium">
               API Key
             </label>
-            <Input
+            <MaskedInput
               id="apiKey"
-              type="password"
               placeholder={
                 apiKeyConfigured && !clearApiKey
                   ? "Configured (leave blank to keep)"
@@ -228,6 +228,8 @@ export default function TenantSettingsForm({
                 setApiKey(e.target.value);
                 setClearApiKey(false);
               }}
+              revealLabel="Show API key"
+              hideLabel="Hide API key"
             />
             {apiKeyConfigured && (
               <label className="flex items-center gap-2 cursor-pointer w-fit text-xs text-muted-foreground">

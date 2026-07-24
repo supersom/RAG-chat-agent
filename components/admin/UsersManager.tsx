@@ -3,6 +3,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { MaskedInput } from "@/components/ui/masked-input";
 import {
   Card,
   CardHeader,
@@ -150,14 +151,15 @@ export default function UsersManager() {
               >
                 Password
               </label>
-              <Input
+              <MaskedInput
                 id="newUserPassword"
-                type="password"
                 autoComplete="new-password"
                 required
                 minLength={8}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
+                revealLabel="Show password"
+                hideLabel="Hide password"
               />
             </div>
             <div className="flex flex-col gap-1">
