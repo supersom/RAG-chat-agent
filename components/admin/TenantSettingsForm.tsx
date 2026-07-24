@@ -12,7 +12,7 @@ import {
   CardContent,
   CardFooter,
 } from "@/components/ui/card";
-import type { Tenant } from "@/app/lib/db/schema";
+import type { RedactedTenant } from "@/app/lib/tenant-redact";
 
 function parseList(raw: string): string[] {
   return raw
@@ -22,7 +22,7 @@ function parseList(raw: string): string[] {
 }
 
 interface TenantSettingsFormProps {
-  tenant: Tenant;
+  tenant: RedactedTenant;
 }
 
 export default function TenantSettingsForm({
@@ -41,10 +41,16 @@ export default function TenantSettingsForm({
   const [allowedOrigins, setAllowedOrigins] = useState(
     (tenant.allowedOrigins ?? []).join("\n"),
   );
-  const [model, setModel] = useState(tenant.llmProviderDefaults.model);
+  const [provider, setProvider] = useState(
+    tenant.llmProviderDefaults.provider ?? "openai",
+  );
+  const [model, setModel] = useState(tenant.llmProviderDefaults.model ?? "");
   const [allowedModels, setAllowedModels] = useState(
     (tenant.llmProviderDefaults.allowedModels ?? []).join(", "),
   );
+  const [apiKey, setApiKey] = useState("");
+  const apiKeyConfigured = tenant.llmProviderDefaults.apiKeyConfigured;
+  const [clearApiKey, setClearApiKey] = useState(false);
   const [amplifyAppId, setAmplifyAppId] = useState(tenant.amplifyAppId ?? "");
   const [awsRegion, setAwsRegion] = useState(tenant.awsRegion ?? "");
 
@@ -70,9 +76,10 @@ export default function TenantSettingsForm({
         amplifyAppId,
         awsRegion,
         llmProviderDefaults: {
-          provider: tenant.llmProviderDefaults.provider,
+          provider,
           model,
           allowedModels: parseList(allowedModels),
+          apiKey: clearApiKey ? null : apiKey || undefined,
         },
       }),
     });
@@ -184,6 +191,59 @@ export default function TenantSettingsForm({
               value={awsRegion}
               onChange={(e) => setAwsRegion(e.target.value)}
             />
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label htmlFor="provider" className="text-sm font-medium">
+              Provider
+            </label>
+            <select
+              id="provider"
+              value={provider}
+              onChange={(e) =>
+                setProvider(e.target.value as "openai" | "anthropic" | "openrouter")
+              }
+              className="border rounded-md px-3 py-2 text-sm bg-background"
+            >
+              <option value="openai">OpenAI</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="openrouter">OpenRouter</option>
+            </select>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label htmlFor="apiKey" className="text-sm font-medium">
+              API Key
+            </label>
+            <Input
+              id="apiKey"
+              type="password"
+              placeholder={
+                apiKeyConfigured && !clearApiKey
+                  ? "Configured (leave blank to keep)"
+                  : "sk-..."
+              }
+              value={apiKey}
+              onChange={(e) => {
+                setApiKey(e.target.value);
+                setClearApiKey(false);
+              }}
+            />
+            {apiKeyConfigured && (
+              <label className="flex items-center gap-2 cursor-pointer w-fit text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={clearApiKey}
+                  onChange={(e) => {
+                    setClearApiKey(e.target.checked);
+                    if (e.target.checked) setApiKey("");
+                  }}
+                  className="h-3 w-3 accent-primary"
+                />
+                Clear the configured key (fall back to the main app&apos;s
+                default provider)
+              </label>
+            )}
           </div>
 
           <div className="flex flex-col gap-1">
