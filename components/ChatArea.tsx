@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import config from "@/config";
 import { loadSettings } from "@/components/SettingsModal";
+import { getTenantToken } from "@/app/lib/tenant-client";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import ReactMarkdown from "react-markdown";
@@ -288,6 +289,7 @@ function ChatArea() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [authRequired, setAuthRequired] = useState(false);
   const [showHeader, setShowHeader] = useState(false);
 
   const uiSettings = loadSettings();
@@ -396,6 +398,7 @@ function ChatArea() {
     }
     if (!showHeader) setShowHeader(true);
     if (!showAvatar) setShowAvatar(true);
+    setAuthRequired(false);
     setIsLoading(true);
 
     const clientStart = performance.now();
@@ -435,14 +438,14 @@ function ChatArea() {
       const startTime = performance.now();
       const response = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-tenant-token": getTenantToken() ?? "",
+        },
         body: JSON.stringify({
           messages: [...messages, userMessage],
           model: selectedModel,
-          knowledgeBaseId: selectedKnowledgeBase,
-          llmApiKey: uiSettings.llmApiKey || undefined,
-          bawsAccessKeyId: uiSettings.bawsAccessKeyId || undefined,
-          bawsSecretAccessKey: uiSettings.bawsSecretAccessKey || undefined,
+          apiKey: uiSettings.llmApiKey || undefined,
         }),
       });
 
@@ -453,6 +456,18 @@ function ChatArea() {
       decodeDebugData(response);
 
       if (!response.ok) {
+        if (response.status === 401) {
+          const errorData = await response.json().catch(() => null);
+          if (errorData?.error === "Authentication required") {
+            setAuthRequired(true);
+            setMessages((prevMessages) =>
+              prevMessages.filter(
+                (message) => message.id !== placeholderMessage.id,
+              ),
+            );
+            return;
+          }
+        }
         throw new Error(`API request failed with status ${response.status}`);
       }
 
@@ -523,6 +538,22 @@ function ChatArea() {
     } catch (error) {
       console.error("Error fetching chat response:", error);
       console.error("Failed to process message:", userMessage.content);
+      setMessages((prevMessages) =>
+        prevMessages.map((message) =>
+          message.id === placeholderMessage.id
+            ? {
+                ...message,
+                content: JSON.stringify({
+                  response:
+                    "Sorry, something went wrong processing that message. Please try again.",
+                  thinking: "Request failed",
+                  user_mood: "neutral",
+                  debug: { context_used: false },
+                }),
+              }
+            : message,
+        ),
+      );
     } finally {
       setIsLoading(false);
       const clientEnd = performance.now();
@@ -660,6 +691,24 @@ function ChatArea() {
       </CardContent>
 
       <CardFooter className="p-4 pt-0">
+        {authRequired ? (
+          <div className="flex w-full flex-col items-center gap-2 rounded-xl border bg-background p-4 text-center">
+            <p className="text-sm text-muted-foreground">
+              Please sign in to continue chatting.
+            </p>
+            <Button
+              size="sm"
+              onClick={() => {
+                const callbackUrl = encodeURIComponent(
+                  window.location.pathname + window.location.search,
+                );
+                window.location.href = `/login?callbackUrl=${callbackUrl}`;
+              }}
+            >
+              Sign in
+            </Button>
+          </div>
+        ) : (
         <form
           onSubmit={handleSubmit}
           className="flex flex-col w-full relative bg-background border rounded-xl focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2"
@@ -694,6 +743,7 @@ function ChatArea() {
             </Button>
           </div>
         </form>
+        )}
       </CardFooter>
     </Card>
   );

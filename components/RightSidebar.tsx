@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useRef } from "react";
+import { useSession } from "next-auth/react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { FileIcon, MessageCircleIcon } from "lucide-react";
 import FullSourceModal from "./FullSourceModal";
@@ -61,7 +62,8 @@ const MAX_HISTORY = 15;
 const POLL_INTERVAL_MS = 5000;
 
 const RightSidebar: React.FC = () => {
-  const isDev = loadSettings().nodeEnv === "development";
+  const { data: session } = useSession();
+  const canViewLogs = session?.user?.role === "admin";
   const [activeTab, setActiveTab] = useState<"kb" | "logs">("kb");
 
   // KB history state
@@ -117,8 +119,6 @@ const RightSidebar: React.FC = () => {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            amplifyAppId: settings.amplifyAppId || undefined,
-            awsRegion: settings.awsRegion || undefined,
             bawsAccessKeyId: settings.bawsAccessKeyId || undefined,
             bawsSecretAccessKey: settings.bawsSecretAccessKey || undefined,
             startTime: lastTimestampRef.current,
@@ -183,7 +183,7 @@ const RightSidebar: React.FC = () => {
             >
               Knowledge Base
             </button>
-            {isDev && (
+            {canViewLogs && (
               <button
                 className={`text-sm font-medium pb-2 border-b-2 transition-colors ${
                   activeTab === "logs"
@@ -250,7 +250,7 @@ const RightSidebar: React.FC = () => {
             </>
           )}
 
-          {isDev && activeTab === "logs" && (
+          {canViewLogs && activeTab === "logs" && (
             <div className="flex flex-col gap-1">
               {logsError && (
                 <div className="text-xs text-red-500 mb-2">Error: {logsError}</div>

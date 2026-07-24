@@ -6,6 +6,21 @@ frontend:
         - npm ci --cache .npm --prefer-offline
     build:
       commands:
+        - echo "AUTH_URL=https://${AWS_BRANCH}.${AWS_APP_ID}.amplifyapp.com" >> .env.production
+        - echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" >> .env.production
+        - echo "AUTH_SECRET=$AUTH_SECRET" >> .env.production
+        - echo "BAWS_ACCESS_KEY_ID=$BAWS_ACCESS_KEY_ID" >> .env.production
+        - echo "BAWS_SECRET_ACCESS_KEY=$BAWS_SECRET_ACCESS_KEY" >> .env.production
+        - echo "BEDROCK_GUARDRAIL_ID=$BEDROCK_GUARDRAIL_ID" >> .env.production
+        - echo "BEDROCK_GUARDRAIL_VERSION=$BEDROCK_GUARDRAIL_VERSION" >> .env.production
+        - echo "COMPANY_NAME=$COMPANY_NAME" >> .env.production
+        - echo "DYNAMODB_TENANTS_TABLE=$DYNAMODB_TENANTS_TABLE" >> .env.production
+        - echo "DYNAMODB_USERS_TABLE=$DYNAMODB_USERS_TABLE" >> .env.production
+        - echo "KNOWLEDGE_BASE_ID=$KNOWLEDGE_BASE_ID" >> .env.production
+        - echo "NEXT_PUBLIC_APP_ENV=$NEXT_PUBLIC_APP_ENV" >> .env.production
+        - echo "NEXT_PUBLIC_KNOWLEDGE_BASE_ID=$NEXT_PUBLIC_KNOWLEDGE_BASE_ID" >> .env.production
+        - echo "NEXT_PUBLIC_MODELS=$NEXT_PUBLIC_MODELS" >> .env.production
+        - echo "TENANT_JWT_SECRET=$TENANT_JWT_SECRET" >> .env.production
         - npm run build
   artifacts:
     baseDirectory: .next
@@ -13,5 +28,4 @@ frontend:
       - "**/*"
   cache:
     paths:
-      - .next/cache/**/*
       - .npm/**/*

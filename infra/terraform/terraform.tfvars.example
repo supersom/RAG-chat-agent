@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars (gitignored) and fill in real values.
+# Never commit terraform.tfvars.
+
+aws_region             = "us-east-2"
+aws_account_id         = "764988411032"
+baws_access_key_id     = "REPLACE_ME"
+baws_secret_access_key = "REPLACE_ME"
+github_access_token    = "REPLACE_ME"

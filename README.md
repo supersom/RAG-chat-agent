@@ -34,6 +34,62 @@ BAWS_SECRET_ACCESS_KEY=your_aws_secret_key
 
 Note: We are adding a 'B' in front of the AWS environment variables for a reason that will be discussed later in the deployment section.
 
+### Auth & Multi-tenancy
+
+Authentication and multi-tenancy are backed by two DynamoDB tables. Add the following to your `.env.local`:
+
+```
+AUTH_SECRET=your-auth-secret
+TENANT_JWT_SECRET=your-tenant-jwt-secret
+DYNAMODB_TENANTS_TABLE=your-tenants-table-name
+DYNAMODB_USERS_TABLE=your-users-table-name
+```
+
+- `AUTH_SECRET` — secret used to sign admin/end-user session tokens.
+- `TENANT_JWT_SECRET` — secret used to sign/verify tenant-scoped JWTs.
+- `DYNAMODB_TENANTS_TABLE` — name of the DynamoDB table storing tenants.
+- `DYNAMODB_USERS_TABLE` — name of the DynamoDB table storing users.
+
+Provision the two tables with the AWS CLI:
+
+```bash
+aws dynamodb create-table \
+  --table-name your-tenants-table-name \
+  --attribute-definitions AttributeName=tenantId,AttributeType=S \
+  --key-schema AttributeName=tenantId,KeyType=HASH \
+  --billing-mode PAY_PER_REQUEST
+
+aws dynamodb create-table \
+  --table-name your-users-table-name \
+  --attribute-definitions \
+      AttributeName=userId,AttributeType=S \
+      AttributeName=email,AttributeType=S \
+      AttributeName=tenantId,AttributeType=S \
+  --key-schema AttributeName=userId,KeyType=HASH \
+  --global-secondary-indexes \
+      '[{
+        "IndexName": "email-index",
+        "KeySchema": [
+          {"AttributeName": "email", "KeyType": "HASH"},
+          {"AttributeName": "tenantId", "KeyType": "RANGE"}
+        ],
+        "Projection": {"ProjectionType": "ALL"}
+      }]' \
+  --billing-mode PAY_PER_REQUEST
+```
+
+### Guardrails
+
+Every chat request is screened by an [Amazon Bedrock Guardrail](https://docs.aws.amazon.com/bedrock/latest/userguide/guardrails.html) — once on the way in (fails closed: if the guardrail call itself errors, the request is blocked) and once on the way out (fails open: if the guardrail call itself errors, the already-generated response is returned unscreened, and the error is logged).
+
+This project does not create the Bedrock Guardrail resource for you. As a one-time manual step per environment:
+
+1. In the AWS Console, go to Amazon Bedrock → Guardrails, and create a guardrail with the content/topic/PII filters you want enforced.
+2. Note the guardrail's ID and version (e.g. `DRAFT`, or a published numeric version) from the guardrail's overview page.
+3. Record these values on each tenant's record in the tenants DynamoDB table (or, for local development, via `BEDROCK_GUARDRAIL_ID` / `BEDROCK_GUARDRAIL_VERSION` in `.env.local`) as `guardrailId` and `guardrailVersion`.
+
+The IAM identity behind `BAWS_ACCESS_KEY_ID` / `BAWS_SECRET_ACCESS_KEY` (or a tenant's own credentials, once per-tenant credential resolution is implemented) needs `bedrock:ApplyGuardrail` permission on the guardrail resource.
+
 ##  How to Get Your Keys
 
 ### Claude API Key

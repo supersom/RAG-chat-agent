@@ -1,0 +1,119 @@
+"use client";
+
+import { Suspense, useState, type FormEvent } from "react";
+import { useSearchParams } from "next/navigation";
+import { signIn, getSession } from "next-auth/react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Card,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+  CardContent,
+  CardFooter,
+} from "@/components/ui/card";
+
+function LoginForm() {
+  const searchParams = useSearchParams();
+  const callbackUrl = searchParams.get("callbackUrl") || "/admin";
+
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  async function handleSubmit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setError(null);
+    setIsSubmitting(true);
+
+    const result = await signIn("credentials", {
+      email,
+      password,
+      redirect: false,
+    });
+
+    setIsSubmitting(false);
+
+    if (!result || result.error) {
+      setError("Invalid email or password.");
+      return;
+    }
+
+    if (callbackUrl.startsWith("/admin")) {
+      const session = await getSession();
+      if (session?.user.role !== "admin") {
+        // A non-admin session (e.g. end_user) landed here via middleware
+        // redirecting an /admin visit -- sending them back to /admin would
+        // just bounce them right back here. Send them to the chat instead
+        // of erroring, since that's a page they can actually use.
+        window.location.href = "/";
+        return;
+      }
+    }
+
+    // Hard navigation, not router.push: a client-side soft navigation can
+    // race the just-set session cookie, so middleware's auth check
+    // sometimes runs before the cookie is visible to it and silently
+    // bounces back here with no error shown.
+    window.location.href = callbackUrl;
+  }
+
+  return (
+    <div className="flex flex-1 items-center justify-center p-4">
+      <Card className="w-full max-w-sm">
+        <CardHeader>
+          <CardTitle>Sign In</CardTitle>
+          <CardDescription>
+            Sign in to continue.
+          </CardDescription>
+        </CardHeader>
+        <form onSubmit={handleSubmit}>
+          <CardContent className="flex flex-col gap-4">
+            <div className="flex flex-col gap-1">
+              <label htmlFor="email" className="text-sm font-medium">
+                Email
+              </label>
+              <Input
+                id="email"
+                type="email"
+                autoComplete="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label htmlFor="password" className="text-sm font-medium">
+                Password
+              </label>
+              <Input
+                id="password"
+                type="password"
+                autoComplete="current-password"
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            </div>
+            {error && <p className="text-sm text-destructive">{error}</p>}
+          </CardContent>
+          <CardFooter>
+            <Button type="submit" className="w-full" disabled={isSubmitting}>
+              {isSubmitting ? "Signing in..." : "Sign in"}
+            </Button>
+          </CardFooter>
+        </form>
+      </Card>
+    </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense>
+      <LoginForm />
+    </Suspense>
+  );
+}
