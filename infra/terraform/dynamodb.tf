@@ -7,6 +7,10 @@ resource "aws_dynamodb_table" "tenants" {
     name = "tenantId"
     type = "S"
   }
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "aws_dynamodb_table" "users" {
@@ -40,5 +44,9 @@ resource "aws_dynamodb_table" "users" {
     name            = "tenantId-index"
     hash_key        = "tenantId"
     projection_type = "ALL"
+  }
+
+  lifecycle {
+    prevent_destroy = true
   }
 }

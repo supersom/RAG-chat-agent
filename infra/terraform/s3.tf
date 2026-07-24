@@ -1,9 +1,22 @@
+# kb1_source intentionally has no matching encryption/public-access-block
+# resource below (unlike kb2_source): its live bucket already has a working
+# encryption configuration that a Terraform resource here would not
+# accurately represent, so it's left unmanaged rather than asserting a
+# wrong value.
 resource "aws_s3_bucket" "kb1_source" {
   bucket = "claude-qkstrt-kb"
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "aws_s3_bucket" "kb2_source" {
   bucket = "css-agent-kb2-materiality-src"
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "kb2_source" {

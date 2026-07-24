@@ -35,9 +35,15 @@ resource "aws_bedrock_guardrail" "default" {
       output_strength = "MEDIUM"
     }
   }
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "aws_bedrock_guardrail_version" "v1" {
   guardrail_arn = aws_bedrock_guardrail.default.guardrail_arn
-  description   = "Initial published version"
+  # Editing this description forces replacement: it publishes a new guardrail
+  # version rather than updating this one in place.
+  description = "Initial published version"
 }

@@ -45,13 +45,19 @@ Add a new `module` block in `bedrock_kb.tf`:
 module "kb3" {
   source = "./modules/bedrock_knowledge_base"
 
-  name_prefix        = "customer-support-agent-kb3-<topic>"
+  name_prefix        = "kb3xyz"
   source_bucket_name = aws_s3_bucket.kb3_source.id  # define this bucket in s3.tf first
   source_bucket_arn  = aws_s3_bucket.kb3_source.arn
   aws_region         = var.aws_region
   aws_account_id     = var.aws_account_id
 }
 ```
+
+`name_prefix` must be ≤ 21 characters — it gets suffixed onto the fixed
+43-character prefix `AmazonBedrockExecutionRoleForKnowledgeBase_`, and IAM
+role names are capped at 64 characters total. This is why the existing KB
+modules in `bedrock_kb.tf` use short prefixes (`zjdw5`, `kb2mat`) rather than
+descriptive ones.
 
 Then also add its S3 PutObject permission to `iam.tf`'s
 `kb_source_bucket_upload` policy resource list, and its bucket's CORS rule,

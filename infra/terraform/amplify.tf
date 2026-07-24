@@ -35,7 +35,8 @@ resource "aws_amplify_app" "preview" {
     # doesn't declare them. This does not declare or manage the values --
     # it only stops Terraform from fighting drift on an attribute this task
     # intentionally leaves unmanaged.
-    ignore_changes = [environment_variables]
+    ignore_changes  = [environment_variables]
+    prevent_destroy = true
   }
 }
 
