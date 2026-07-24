@@ -112,4 +112,66 @@ describe("resolveTenantContext", () => {
     expect(result.error).toBe("Origin not allowed");
     expect(mockedGetTenant).not.toHaveBeenCalled();
   });
+
+  it("resolves the tenant from a logged-in session, ignoring any tenant token", async () => {
+    vi.stubEnv("BAWS_ACCESS_KEY_ID", "session-access-key");
+    vi.stubEnv("BAWS_SECRET_ACCESS_KEY", "session-secret-key");
+
+    mockedAuth.mockResolvedValue({
+      user: { role: "end_user", tenantId: "session-tenant" },
+    } as any);
+    mockedGetTenant.mockResolvedValue({
+      tenantId: "session-tenant",
+      name: "Session Tenant",
+      knowledgeBaseId: "kb-session",
+      llmProviderDefaults: { provider: "anthropic", model: "claude-sonnet-4-5" },
+      requireEndUserAuth: true,
+      guardrailId: "",
+      guardrailVersion: "",
+      createdAt: new Date().toISOString(),
+    });
+
+    // No x-tenant-token header at all -- a foreign token would be ignored
+    // even if present, since the session already resolved a tenant.
+    const req = new Request("https://example.com/api/chat", {
+      headers: {
+        "x-tenant-token": await signTenantToken({ tenantId: "some-other-tenant" }),
+      },
+    });
+
+    const result = await resolveTenantContext(req);
+
+    expect(isTenantResolutionError(result)).toBe(false);
+    if (isTenantResolutionError(result)) throw new Error("unreachable");
+
+    expect(result.tenantId).toBe("session-tenant");
+    expect(mockedGetTenant).toHaveBeenCalledWith("session-tenant");
+    expect(mockedGetTenant).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an anonymous request to a tenant that requires end-user auth", async () => {
+    const token = await signTenantToken({ tenantId: "acme" });
+    mockedGetTenant.mockResolvedValue({
+      tenantId: "acme",
+      name: "Acme",
+      knowledgeBaseId: "kb-acme",
+      llmProviderDefaults: { provider: "anthropic", model: "claude-sonnet-4-5" },
+      requireEndUserAuth: true,
+      guardrailId: "",
+      guardrailVersion: "",
+      createdAt: new Date().toISOString(),
+    });
+
+    const req = new Request("https://example.com/api/chat", {
+      headers: { "x-tenant-token": token },
+    });
+
+    const result = await resolveTenantContext(req);
+
+    expect(isTenantResolutionError(result)).toBe(true);
+    if (!isTenantResolutionError(result)) throw new Error("unreachable");
+
+    expect(result.status).toBe(401);
+    expect(result.error).toBe("Authentication required");
+  });
 });
