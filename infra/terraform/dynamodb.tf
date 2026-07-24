@@ -50,3 +50,47 @@ resource "aws_dynamodb_table" "users" {
     prevent_destroy = true
   }
 }
+
+
+resource "aws_dynamodb_table" "activity" {
+  name         = "CustomerSupportAgent-Activity"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "tenantId"
+  range_key    = "createdAtActivityId"
+
+  attribute {
+    name = "tenantId"
+    type = "S"
+  }
+
+  attribute {
+    name = "createdAtActivityId"
+    type = "S"
+  }
+
+  attribute {
+    name = "tenantUserId"
+    type = "S"
+  }
+
+  attribute {
+    name = "createdAt"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = "tenantUserId-createdAt-index"
+    hash_key        = "tenantUserId"
+    range_key       = "createdAt"
+    projection_type = "ALL"
+  }
+
+  ttl {
+    attribute_name = "expiresAt"
+    enabled        = true
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
