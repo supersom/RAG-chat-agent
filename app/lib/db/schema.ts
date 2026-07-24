@@ -1,10 +1,13 @@
+export type LlmProvider = "openai" | "anthropic" | "openrouter";
+
 export interface Tenant {
   tenantId: string;
   name: string;
   knowledgeBaseId: string;
-  llmProviderDefaults: {
-    provider: string;
-    model: string;
+  llmProviderDefaults?: {
+    provider?: LlmProvider;
+    apiKeyCiphertext?: string;
+    model?: string;
     allowedModels?: string[];
   };
   requireEndUserAuth: boolean;
