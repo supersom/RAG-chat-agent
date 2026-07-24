@@ -147,3 +147,12 @@ While drafting the plan's deployment task, I quoted the live output of `aws ampl
 **Decision:** Add `CustomerSupportAgent-Activity` as a tenant-keyed DynamoDB table with a `tenantUserId-createdAt-index`, expose `session.user.id`, write authenticated chat turns and sanitized `app_log` records from `/api/chat`, add `/api/activity` with tenant/user scoping, and hydrate `ChatArea`, `LeftSidebar`, and `RightSidebar` from persisted activity. The visible admin log tab is now an Activity Logs feed backed by tenant-scoped records instead of raw CloudWatch events. End users receive only `chat_turn` records from the activity API; admins can read tenant-wide activity and filter to same-tenant users.
 
 **Status:** Implemented locally and verified with typecheck, lint, and the full Vitest suite. Not pushed; no Amplify deploy triggered. Before live verification, apply/provision the new activity table and `DYNAMODB_ACTIVITY_TABLE` env var in the target Amplify environment.
+
+## 2026-07-24 — Persistent activity history deployed to preview
+
+**Context:** Pushing `worktree-tenant-llm-config` triggers Amplify deployment for preview app `d2l47euepvccx6`. The activity-history code required the new `CustomerSupportAgent-Activity` table, its `tenantUserId-createdAt-index`, IAM access for the existing service user, and `DYNAMODB_ACTIVITY_TABLE` in Amplify.
+
+**Decision:** Pushed the branch and let Amplify deploy commit `25d24e3`. Terraform was not applied from this worktree because the local state was not connected to the already-imported resources; `terraform plan` wanted to create 20 resources, not just the activity table. Instead, provisioned only the missing activity table via AWS CLI in `us-east-2`, enabled TTL on `expiresAt`, and updated the existing `DynamoDBTenantsUsersAccess` inline policy for `claude-qkstart-bedrock` to include the activity table and index ARNs. `DYNAMODB_ACTIVITY_TABLE=CustomerSupportAgent-Activity` was already present at the Amplify app level.
+
+**Status:** Amplify job 7 succeeded for `25d24e3`. `CustomerSupportAgent-Activity` and `tenantUserId-createdAt-index` are ACTIVE, TTL is enabled, the app homepage returns 200, and unauthenticated `/api/activity` returns 401 as expected.
+
