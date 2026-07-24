@@ -21,6 +21,7 @@ frontend:
         - echo "NEXT_PUBLIC_KNOWLEDGE_BASE_ID=$NEXT_PUBLIC_KNOWLEDGE_BASE_ID" >> .env.production
         - echo "NEXT_PUBLIC_MODELS=$NEXT_PUBLIC_MODELS" >> .env.production
         - echo "TENANT_JWT_SECRET=$TENANT_JWT_SECRET" >> .env.production
+        - echo "TENANT_SECRETS_KEY=$TENANT_SECRETS_KEY" >> .env.production
         - npm run build
   artifacts:
     baseDirectory: .next
