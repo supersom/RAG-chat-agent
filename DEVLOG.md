@@ -131,3 +131,12 @@ While drafting the plan's deployment task, I quoted the live output of `aws ampl
 **Decision:** Add a reusable `components/ui/masked-input.tsx` control with `Eye`/`EyeOff` toggling, then use it for login password, admin signup password, admin user creation password, tenant API key, and the existing settings modal secret fields.
 
 **Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck` and `npm run lint`. Not pushed; no Amplify deploy triggered.
+
+## 2026-07-24 — Persistent activity history design
+
+**Context:** Chat messages, assistant thinking, knowledge-base source references, and admin CloudWatch logs currently live only in client-side React state. Navigating away, refreshing, logging out, or logging back in loses them. The requested behavior needs durable, per-user history plus admin visibility across users in the same tenant, with a hard guarantee that cross-tenant logs are never exposed.
+
+**Decision:** Document a server-side activity-history design in `docs/superpowers/specs/2026-07-24-persistent-activity-history.md`. The recommended path is a new tenant-keyed DynamoDB activity table, writes from trusted server routes such as `/api/chat`, reads scoped only from the signed NextAuth session, and replacing the admin-facing raw CloudWatch sidebar with persisted tenant-scoped structured app logs. Raw Amplify CloudWatch logs are app-level, so they are not safe as the durable tenant activity feed unless every event is structured, tenant-tagged, sanitized, and filtered server-side.
+
+**Status:** Design documented locally. Implementation is backlogged because it requires a new table, IAM/env provisioning, persistence helpers, new APIs, UI hydration, and cross-tenant regression tests. Not pushed; no Amplify deploy triggered.
+
