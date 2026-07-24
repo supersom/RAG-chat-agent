@@ -138,5 +138,12 @@ While drafting the plan's deployment task, I quoted the live output of `aws ampl
 
 **Decision:** Document a server-side activity-history design in `docs/superpowers/specs/2026-07-24-persistent-activity-history.md`. The recommended path is a new tenant-keyed DynamoDB activity table, writes from trusted server routes such as `/api/chat`, reads scoped only from the signed NextAuth session, and replacing the admin-facing raw CloudWatch sidebar with persisted tenant-scoped structured app logs. Raw Amplify CloudWatch logs are app-level, so they are not safe as the durable tenant activity feed unless every event is structured, tenant-tagged, sanitized, and filtered server-side.
 
-**Status:** Design documented locally. Implementation is backlogged because it requires a new table, IAM/env provisioning, persistence helpers, new APIs, UI hydration, and cross-tenant regression tests. Not pushed; no Amplify deploy triggered.
+**Status:** Implemented locally in stagewise commits on `worktree-tenant-llm-config`. The branch now defines the activity DynamoDB table/IAM/env wiring, persists authenticated chat turns and sanitized app logs from `/api/chat`, exposes a session-scoped `/api/activity` read API, hydrates chat/thinking/KB/admin activity-log UI from persisted activity, and includes tenant-isolation tests. Not pushed; no Amplify deploy triggered. Deployment still requires applying the Terraform table/IAM change and provisioning `DYNAMODB_ACTIVITY_TABLE` on the target Amplify app before pushing/deploying.
 
+## 2026-07-24 — Persistent activity history implemented
+
+**Context:** The durable activity-history design above needed to become actual app behavior without using raw app-level CloudWatch as the tenant-visible feed.
+
+**Decision:** Add `CustomerSupportAgent-Activity` as a tenant-keyed DynamoDB table with a `tenantUserId-createdAt-index`, expose `session.user.id`, write authenticated chat turns and sanitized `app_log` records from `/api/chat`, add `/api/activity` with tenant/user scoping, and hydrate `ChatArea`, `LeftSidebar`, and `RightSidebar` from persisted activity. The visible admin log tab is now an Activity Logs feed backed by tenant-scoped records instead of raw CloudWatch events. End users receive only `chat_turn` records from the activity API; admins can read tenant-wide activity and filter to same-tenant users.
+
+**Status:** Implemented locally and verified with typecheck, lint, and the full Vitest suite. Not pushed; no Amplify deploy triggered. Before live verification, apply/provision the new activity table and `DYNAMODB_ACTIVITY_TABLE` env var in the target Amplify environment.
