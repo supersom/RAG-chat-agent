@@ -108,7 +108,13 @@ const RightSidebar: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (activeTab !== "logs") return;
+    if (canViewLogs) {
+      setActiveTab("logs");
+    }
+  }, [canViewLogs]);
+
+  useEffect(() => {
+    if (!canViewLogs || activeTab !== "logs") return;
 
     const settings = loadSettings();
 
@@ -148,7 +154,7 @@ const RightSidebar: React.FC = () => {
     fetchLogs();
     const interval = setInterval(fetchLogs, POLL_INTERVAL_MS);
     return () => clearInterval(interval);
-  }, [activeTab]);
+  }, [activeTab, canViewLogs]);
 
   useEffect(() => {
     if (activeTab === "logs") {

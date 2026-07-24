@@ -115,3 +115,11 @@ While drafting the plan's deployment task, I quoted the live output of `aws ampl
 **Decision:** Add role-aware actions to `components/TopNavBar.tsx`: admins see `Manage` (links to `/admin`) and `Log out`; end users see `Log out`; logged-out visitors see no new auth action. Reused `components/LogoutButton.tsx` so logout behavior stays consistent with the admin layout, and added a small logout icon for recognizability.
 
 **Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck` and `npm run lint`. Not pushed; no Amplify deploy triggered.
+
+## 2026-07-24 — Admin chat sidebar now defaults to live CloudWatch logs
+
+**Context:** While logged into an admin account on the main chat surface, CloudWatch logs were easy to miss because `components/RightSidebar.tsx` always initialized on the Knowledge Base tab and only started polling `/api/logs` when the CloudWatch Logs tab was active. The logs API itself is admin-gated and queries the logged-in tenant's configured `amplifyAppId`/`awsRegion`, so tenant metadata also determines which deployment's logs appear.
+
+**Decision:** When the client session resolves to an admin user, automatically switch the right sidebar to the CloudWatch Logs tab and make the polling effect depend on `canViewLogs` as well as the active tab. This starts polling only after the admin session is known, and keeps non-admin users from polling the admin-only endpoint.
+
+**Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck` and `npm run lint`. Not pushed; no Amplify deploy triggered.
