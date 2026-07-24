@@ -6,6 +6,64 @@ import { resolveTenantContext, isTenantResolutionError } from "@/app/lib/tenant"
 import { applyGuardrail, GuardrailResult } from "@/app/lib/guardrails";
 import { resolveLlmConfig } from "@/app/lib/llm-config";
 
+type ChatMessage = {
+  role: "user" | "assistant" | "system";
+  content: string;
+};
+
+async function generateCompletion({
+  provider,
+  apiKey,
+  model,
+  messages,
+}: {
+  provider: string;
+  apiKey: string;
+  model: string;
+  messages: ChatMessage[];
+}) {
+  if (provider === "anthropic") {
+    const Anthropic = (await import("@anthropic-ai/sdk")).default;
+    const client = new Anthropic({ apiKey });
+    const system = messages
+      .filter((message) => message.role === "system")
+      .map((message) => message.content)
+      .join("\n\n");
+    const anthropicMessages = messages
+      .filter((message) => message.role !== "system")
+      .map((message) => ({
+        role: message.role as "user" | "assistant",
+        content: message.content,
+      }));
+
+    const message = await client.messages.create({
+      model,
+      max_tokens: 1000,
+      system: system || undefined,
+      messages: anthropicMessages,
+      temperature: 0.3,
+    });
+    const textContent = message.content
+      .filter((block) => block.type === "text")
+      .map((block) => block.text)
+      .join("");
+
+    return {
+      choices: [{ message: { content: textContent } }],
+    };
+  }
+
+  const { completion } = await import("litellm");
+  return (completion as any)({
+    model,
+    max_tokens: 1000,
+    messages,
+    temperature: 0.3,
+    apiKey,
+    response_format: { type: "json_object" },
+  });
+}
+
 // Debug message helper function
 // Input: message string and optional data object
 // Output: JSON string with message, sanitized data, and timestamp
@@ -301,20 +359,16 @@ export async function POST(req: Request) {
     console.log(`🚀 Query Processing`);
     measureTime("Claude Generation Start");
 
-    const litellmMessages = [
+    const litellmMessages: ChatMessage[] = [
       { role: "system", content: systemPrompt },
       ...messages.map((msg: any) => ({ role: msg.role, content: msg.content })),
     ];
 
-    const { completion } = await import("litellm");
-
-    const response = await (completion as any)({
+    const response = await generateCompletion({
+      provider: llmConfig.provider,
       model: resolvedModel,
-      max_tokens: 1000,
-      messages: litellmMessages,
-      temperature: 0.3,
       apiKey: llmConfig.apiKey,
-      response_format: { type: "json_object" },
+      messages: litellmMessages,
     });
 
     measureTime("Claude Generation Complete");
