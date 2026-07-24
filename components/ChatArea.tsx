@@ -457,16 +457,18 @@ function ChatArea() {
 
       if (!response.ok) {
         if (response.status === 401) {
-          const errorData = await response.json().catch(() => null);
-          if (errorData?.error === "Authentication required") {
-            setAuthRequired(true);
-            setMessages((prevMessages) =>
-              prevMessages.filter(
-                (message) => message.id !== placeholderMessage.id,
-              ),
-            );
-            return;
-          }
+          // resolveTenantContext() only ever returns 401 from the
+          // no-session branch, so any 401 here means "not signed in" --
+          // signing in resolves the tenant via the session regardless of
+          // which specific reason (missing/invalid token, end-user auth
+          // required) triggered it.
+          setAuthRequired(true);
+          setMessages((prevMessages) =>
+            prevMessages.filter(
+              (message) => message.id !== placeholderMessage.id,
+            ),
+          );
+          return;
         }
         throw new Error(`API request failed with status ${response.status}`);
       }
