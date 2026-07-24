@@ -2,8 +2,8 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
 import { getTenant, updateTenant } from "@/app/lib/db/tenants";
-import { encryptApiKey } from "@/app/lib/tenant-secrets";
 import { redactTenant } from "@/app/lib/tenant-redact";
+import { mergeLlmProviderDefaults } from "@/app/lib/tenant-llm-patch";
 import type { Tenant } from "@/app/lib/db/schema";
 
 const editableTenantSchema = z
@@ -72,30 +72,11 @@ export async function PATCH(req: Request) {
   let llmProviderDefaults: Tenant["llmProviderDefaults"] = existing.llmProviderDefaults;
 
   if (patchDefaults) {
-    const { apiKey, ...fieldPatch } = patchDefaults;
-
-    const merged: NonNullable<Tenant["llmProviderDefaults"]> = {
-      ...(existing.llmProviderDefaults ?? {}),
-      ...fieldPatch,
-    };
-
-    if (apiKey === null || apiKey === "") {
-      delete merged.apiKeyCiphertext;
-    } else if (apiKey) {
-      merged.apiKeyCiphertext = encryptApiKey(apiKey);
+    const result = mergeLlmProviderDefaults(existing.llmProviderDefaults, patchDefaults);
+    if (!result.ok) {
+      return NextResponse.json({ error: result.error }, { status: 400 });
     }
-
-    if (merged.apiKeyCiphertext && (!merged.provider || !merged.model)) {
-      return NextResponse.json(
-        {
-          error:
-            "A provider and model must be set together with an API key.",
-        },
-        { status: 400 },
-      );
-    }
-
-    llmProviderDefaults = merged;
+    llmProviderDefaults = result.llmProviderDefaults;
   }
 
   const updated = await updateTenant(session.user.tenantId, {
