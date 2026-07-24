@@ -1,8 +1,28 @@
-import { GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, PutCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { ddbDocClient } from "./client";
 import { Tenant } from "./schema";
 
 const TABLE_NAME = process.env.DYNAMODB_TENANTS_TABLE!;
+
+// Table isn't large enough yet to need a GSI for this -- a Scan is fine for
+// an infrequent admin-facing check, unlike anything on the chat hot path.
+export async function isKnowledgeBaseSharedWithOtherTenants(
+  knowledgeBaseId: string,
+  ownTenantId: string,
+): Promise<boolean> {
+  const result = await ddbDocClient.send(
+    new ScanCommand({
+      TableName: TABLE_NAME,
+      FilterExpression: "knowledgeBaseId = :kb AND tenantId <> :self",
+      ExpressionAttributeValues: {
+        ":kb": knowledgeBaseId,
+        ":self": ownTenantId,
+      },
+      ProjectionExpression: "tenantId",
+    }),
+  );
+  return (result.Items?.length ?? 0) > 0;
+}
 
 export async function getTenant(tenantId: string): Promise<Tenant | null> {
   const result = await ddbDocClient.send(
