@@ -1,0 +1,67 @@
+import { auth } from "@/auth";
+import {
+  getActivityForTenant,
+  getActivityForTenantUser,
+} from "@/app/lib/db/activity";
+import { getUserById } from "@/app/lib/db/users";
+import {
+  ActivityAccessError,
+  resolveActivityReadScope,
+} from "@/app/lib/activity-scope";
+
+function parseLimit(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return undefined;
+  return parsed;
+}
+
+export async function GET(req: Request) {
+  const session = await auth();
+  if (!session?.user?.id) {
+    return Response.json({ error: "Authentication required" }, { status: 401 });
+  }
+
+  const url = new URL(req.url);
+  const requestedUserId = url.searchParams.get("userId");
+  const before = url.searchParams.get("before") || undefined;
+  const limit = parseLimit(url.searchParams.get("limit"));
+  const requestedUser =
+    session.user.role === "admin" && requestedUserId
+      ? await getUserById(requestedUserId)
+      : null;
+
+  try {
+    const scope = resolveActivityReadScope({
+      sessionUser: {
+        id: session.user.id,
+        role: session.user.role,
+        tenantId: session.user.tenantId,
+      },
+      requestedUserId,
+      requestedUser,
+    });
+
+    const activities =
+      scope.kind === "tenant"
+        ? await getActivityForTenant({
+            tenantId: scope.tenantId,
+            limit,
+            before,
+          })
+        : await getActivityForTenantUser({
+            tenantId: scope.tenantId,
+            userId: scope.userId,
+            limit,
+            before,
+          });
+
+    return Response.json({ activities });
+  } catch (err) {
+    if (err instanceof ActivityAccessError) {
+      return Response.json({ error: err.message }, { status: err.status });
+    }
+    console.error("Failed to read activity:", err);
+    return Response.json({ error: "Failed to read activity" }, { status: 500 });
+  }
+}
