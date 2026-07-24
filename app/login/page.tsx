@@ -44,7 +44,11 @@ function LoginForm() {
     if (callbackUrl.startsWith("/admin")) {
       const session = await getSession();
       if (session?.user.role !== "admin") {
-        setError("This account doesn't have admin access.");
+        // A non-admin session (e.g. end_user) landed here via middleware
+        // redirecting an /admin visit -- sending them back to /admin would
+        // just bounce them right back here. Send them to the chat instead
+        // of erroring, since that's a page they can actually use.
+        window.location.href = "/";
         return;
       }
     }
