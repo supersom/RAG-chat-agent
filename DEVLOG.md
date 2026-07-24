@@ -179,3 +179,11 @@ While drafting the plan's deployment task, I quoted the live output of `aws ampl
 **Decision:** Add structured `app_log` records throughout `/api/chat` for request receipt, LLM config resolution, input/output guardrail checks, RAG retrieval, LLM generation, response parsing, and completion timing. Chat turns now persist separate user/assistant message timestamps and the chat UI renders them when hydrating from activity history. The knowledge-base admin upload UI now supports multi-file selection plus local folder selection, uploads every selected item, flattens S3 keys to sanitized filenames, and adds a six-character hash suffix only when a selected batch would otherwise collide after flattening.
 
 **Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck`, `npm run lint`, and `npm test`. Not pushed; no Amplify deploy triggered.
+
+## 2026-07-24 — Sidebar history ordering and scroll alignment
+
+**Context:** Chat history already rendered chronologically and stayed aligned to the latest message at the bottom, but Assistant Thinking and Knowledge Base history rendered newest-first at the top. Activity Logs also rendered newest-first but were auto-scrolled to the bottom, hiding the latest events.
+
+**Decision:** Render Assistant Thinking and Knowledge Base history chronologically by reversing the newest-first activity query slice and appending live updates, then scroll those panels to the bottom when content changes. Keep Activity Logs newest-first, but scroll them to the top so the latest tenant-scoped log records stay visible.
+
+**Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck`, `npm run lint`, and `npm test`. Not pushed; no Amplify deploy triggered.

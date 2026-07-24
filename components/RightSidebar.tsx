@@ -55,11 +55,15 @@ type ActivityRecord = {
   };
 };
 
-function userLabel(activity: Pick<ActivityRecord, "userEmail" | "userId">): string {
+function userLabel(
+  activity: Pick<ActivityRecord, "userEmail" | "userId">,
+): string {
   return activity.userEmail || activity.userId;
 }
 
-function ragHistoryFromActivities(activities: ActivityRecord[]): RAGHistoryItem[] {
+function ragHistoryFromActivities(
+  activities: ActivityRecord[],
+): RAGHistoryItem[] {
   return activities
     .filter(
       (activity) =>
@@ -68,6 +72,7 @@ function ragHistoryFromActivities(activities: ActivityRecord[]): RAGHistoryItem[
         activity.knowledgeBase.sources.length > 0,
     )
     .slice(0, MAX_HISTORY)
+    .reverse()
     .map((activity) => ({
       sources: activity.knowledgeBase!.sources.map((source) => ({
         ...source,
@@ -107,7 +112,8 @@ const getScoreColor = (score: number): string => {
 
 const getLogColor = (message: string): string => {
   const m = message.toLowerCase();
-  if (m.includes("error") || m.includes("💥") || m.includes("❌")) return "text-red-500";
+  if (m.includes("error") || m.includes("💥") || m.includes("❌"))
+    return "text-red-500";
   if (m.includes("warn") || m.includes("🚨")) return "text-yellow-500";
   return "text-foreground";
 };
@@ -129,8 +135,8 @@ const RightSidebar: React.FC = () => {
   const [logs, setLogs] = useState<LogEvent[]>([]);
   const [logsError, setLogsError] = useState<string | null>(null);
   const [logsLoading, setLogsLoading] = useState(false);
-  const logsEndRef = useRef<HTMLDivElement>(null);
-
+  const kbEndRef = useRef<HTMLDivElement>(null);
+  const logsTopRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (session?.user) return;
@@ -169,30 +175,60 @@ const RightSidebar: React.FC = () => {
 
   useEffect(() => {
     const updateRAGSources = (
-      event: CustomEvent<{ sources: RAGSource[]; query: string; debug?: DebugInfo }>
+      event: CustomEvent<{
+        sources: RAGSource[];
+        query: string;
+        debug?: DebugInfo;
+      }>,
     ) => {
       const { sources, query, debug } = event.detail;
-      if (!Array.isArray(sources) || sources.length === 0 || !debug?.context_used) return;
+      if (
+        !Array.isArray(sources) ||
+        sources.length === 0 ||
+        !debug?.context_used
+      )
+        return;
 
       const cleanedSources = sources.map((source) => ({
         ...source,
         snippet: source.snippet || "No preview available",
-        fileName: (source.fileName || "").replace(/_/g, " ").replace(".txt", "") || "Unnamed",
+        fileName:
+          (source.fileName || "").replace(/_/g, " ").replace(".txt", "") ||
+          "Unnamed",
         timestamp: new Date().toISOString(),
       }));
 
       setRagHistory((prev) =>
-        [{ sources: cleanedSources, timestamp: new Date().toISOString(), query: query || "Unknown query" }, ...prev].slice(0, MAX_HISTORY)
+        [
+          ...prev,
+          {
+            sources: cleanedSources,
+            timestamp: new Date().toISOString(),
+            query: query || "Unknown query",
+          },
+        ].slice(-MAX_HISTORY),
       );
     };
 
     const updateDebug = (_event: CustomEvent<SidebarEvent>) => {};
 
-    window.addEventListener("updateRagSources" as any, updateRAGSources as EventListener);
-    window.addEventListener("updateSidebar" as any, updateDebug as EventListener);
+    window.addEventListener(
+      "updateRagSources" as any,
+      updateRAGSources as EventListener,
+    );
+    window.addEventListener(
+      "updateSidebar" as any,
+      updateDebug as EventListener,
+    );
     return () => {
-      window.removeEventListener("updateRagSources" as any, updateRAGSources as EventListener);
-      window.removeEventListener("updateSidebar" as any, updateDebug as EventListener);
+      window.removeEventListener(
+        "updateRagSources" as any,
+        updateRAGSources as EventListener,
+      );
+      window.removeEventListener(
+        "updateSidebar" as any,
+        updateDebug as EventListener,
+      );
     };
   }, []);
 
@@ -238,8 +274,17 @@ const RightSidebar: React.FC = () => {
   }, [activeTab, canViewLogs]);
 
   useEffect(() => {
+    if (activeTab === "kb") {
+      kbEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
+  }, [ragHistory, activeTab]);
+
+  useEffect(() => {
     if (activeTab === "logs") {
-      logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      logsTopRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
     }
   }, [logs, activeTab]);
 
@@ -257,7 +302,10 @@ const RightSidebar: React.FC = () => {
 
   return (
     <aside className="w-[380px] pr-4 overflow-hidden pb-4">
-      <Card className={`${fadeInUpClass} h-full overflow-hidden flex flex-col`} style={fadeStyle}>
+      <Card
+        className={`${fadeInUpClass} h-full overflow-hidden flex flex-col`}
+        style={fadeStyle}
+      >
         <CardHeader className="pb-0">
           <div className="flex items-center gap-4 border-b">
             <button
@@ -300,9 +348,14 @@ const RightSidebar: React.FC = () => {
                   style={{ ...fadeStyle, animationDelay: `${index * 50}ms` }}
                 >
                   <div className="flex items-center text-xs text-muted-foreground mb-2 gap-1">
-                    <MessageCircleIcon size={14} className="text-muted-foreground" />
+                    <MessageCircleIcon
+                      size={14}
+                      className="text-muted-foreground"
+                    />
                     {historyItem.userLabel && (
-                      <span className="font-medium">{historyItem.userLabel}</span>
+                      <span className="font-medium">
+                        {historyItem.userLabel}
+                      </span>
                     )}
                     <span>{historyItem.query}</span>
                   </div>
@@ -310,7 +363,10 @@ const RightSidebar: React.FC = () => {
                     <Card
                       key={source.id}
                       className={`mb-2 ${fadeInUpClass}`}
-                      style={{ ...fadeStyle, animationDelay: `${index * 100 + sourceIndex * 75}ms` }}
+                      style={{
+                        ...fadeStyle,
+                        animationDelay: `${index * 100 + sourceIndex * 75}ms`,
+                      }}
                     >
                       <CardContent className="py-4">
                         <p className="text-sm text-muted-foreground">
@@ -337,21 +393,28 @@ const RightSidebar: React.FC = () => {
                   ))}
                 </div>
               ))}
+              <div ref={kbEndRef} />
             </>
           )}
 
           {canViewLogs && activeTab === "logs" && (
             <div className="flex flex-col gap-1">
+              <div ref={logsTopRef} />
               {logsError && (
-                <div className="text-xs text-red-500 mb-2">Error: {logsError}</div>
+                <div className="text-xs text-red-500 mb-2">
+                  Error: {logsError}
+                </div>
               )}
               {logs.length === 0 && !logsLoading && !logsError && (
                 <div className="text-sm text-muted-foreground">
                   No persisted activity logs yet. Polling every 5s.
                 </div>
               )}
-              {logs.map((event, i) => (
-                <div key={i} className="font-mono text-xs leading-relaxed">
+              {logs.map((event) => (
+                <div
+                  key={event.id}
+                  className="font-mono text-xs leading-relaxed"
+                >
                   <span className="text-muted-foreground mr-2">
                     {event.timestamp
                       ? new Date(event.timestamp).toLocaleTimeString()
@@ -370,7 +433,6 @@ const RightSidebar: React.FC = () => {
               {logsLoading && logs.length === 0 && (
                 <div className="text-xs text-muted-foreground">Loading…</div>
               )}
-              <div ref={logsEndRef} />
             </div>
           )}
         </CardContent>
