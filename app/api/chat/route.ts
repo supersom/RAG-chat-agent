@@ -92,7 +92,16 @@ export async function POST(req: Request) {
   }
   const tenant = tenantResult;
 
-  const llmConfig = resolveLlmConfig(tenant.llmProviderDefaults, clientApiKey);
+  let llmConfig;
+  try {
+    llmConfig = resolveLlmConfig(tenant.llmProviderDefaults, clientApiKey);
+  } catch (err) {
+    console.error("Failed to resolve LLM config:", err);
+    return Response.json(
+      { error: "Failed to resolve LLM provider configuration" },
+      { status: 500 },
+    );
+  }
   if (!llmConfig) {
     return Response.json(
       { error: "No LLM provider configured for this tenant" },
