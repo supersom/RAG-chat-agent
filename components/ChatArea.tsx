@@ -190,6 +190,19 @@ interface Message {
   id: string;
   role: string;
   content: string;
+  timestamp?: string;
+}
+
+function formatMessageTimestamp(timestamp?: string): string {
+  if (!timestamp) return "";
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 type ActivityRecord = {
@@ -197,7 +210,9 @@ type ActivityRecord = {
   kind: "chat_turn" | "app_log";
   chat?: {
     userMessage: string;
+    userMessageCreatedAt?: string;
     assistantMessage?: string;
+    assistantMessageCreatedAt?: string;
     assistantThinking?: string;
     userMood?: string;
     suggestedQuestions?: string[];
@@ -236,11 +251,13 @@ function messagesFromActivities(activities: ActivityRecord[]): Message[] {
           id: `${activity.activityId}-user`,
           role: "user",
           content: chat.userMessage,
+          timestamp: chat.userMessageCreatedAt,
         },
         {
           id: `${activity.activityId}-assistant`,
           role: "assistant",
           content: JSON.stringify(assistantPayload),
+          timestamp: chat.assistantMessageCreatedAt,
         },
       ];
     });
@@ -490,11 +507,13 @@ function ChatArea() {
       id: crypto.randomUUID(),
       role: "user",
       content: typeof event === "string" ? event : input,
+      timestamp: new Date().toISOString(),
     };
 
     const placeholderMessage = {
       id: crypto.randomUUID(),
       role: "assistant",
+      timestamp: new Date().toISOString(),
       content: JSON.stringify({
         response: "",
         thinking: "AI is processing...",
@@ -596,6 +615,7 @@ function ChatArea() {
         newMessages[lastIndex] = {
           id: crypto.randomUUID(),
           role: "assistant",
+          timestamp: new Date().toISOString(),
           content: JSON.stringify(data),
         };
         return newMessages;
@@ -627,6 +647,7 @@ function ChatArea() {
           message.id === placeholderMessage.id
             ? {
                 ...message,
+                timestamp: new Date().toISOString(),
                 content: JSON.stringify({
                   response:
                     "Sorry, something went wrong processing that message. Please try again.",
@@ -755,6 +776,17 @@ function ChatArea() {
                         content={message.content}
                         role={message.role}
                       />
+                      {formatMessageTimestamp(message.timestamp) && (
+                        <div
+                          className={`mt-2 text-[11px] ${
+                            message.role === "user"
+                              ? "text-primary-foreground/75"
+                              : "text-muted-foreground"
+                          }`}
+                        >
+                          {formatMessageTimestamp(message.timestamp)}
+                        </div>
+                      )}
                     </div>
                   </div>
                   {message.role === "assistant" && (

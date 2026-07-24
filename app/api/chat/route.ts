@@ -12,6 +12,7 @@ import { ActivityLlmProvider } from "@/app/lib/db/schema";
 type ChatMessage = {
   role: "user" | "assistant" | "system";
   content: string;
+  timestamp?: string;
 };
 
 type ActivityActor = {
@@ -26,12 +27,37 @@ function sanitizeActivityText(value: unknown, maxLength = 4000): string {
   return text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "").slice(0, maxLength);
 }
 
+
+function sanitizeActivityMetadata(
+  metadata: Record<string, unknown>,
+): Record<string, string | number | boolean | null> {
+  return Object.fromEntries(
+    Object.entries(metadata).map(([key, value]) => {
+      if (
+        value === null ||
+        typeof value === "number" ||
+        typeof value === "boolean"
+      ) {
+        return [key, value];
+      }
+
+      return [key, sanitizeActivityText(value, 500)];
+    }),
+  );
+}
+
+function durationMs(start: number): number {
+  return Math.round(performance.now() - start);
+}
+
 async function persistChatActivity({
   actor,
   provider,
   model,
   userMessage,
+  userMessageCreatedAt,
   assistantMessage,
+  assistantMessageCreatedAt,
   assistantThinking,
   userMood,
   suggestedQuestions,
@@ -45,7 +71,9 @@ async function persistChatActivity({
   provider: ActivityLlmProvider;
   model: string;
   userMessage: string;
+  userMessageCreatedAt?: string;
   assistantMessage?: string;
+  assistantMessageCreatedAt?: string;
   assistantThinking?: string;
   userMood?: string;
   suggestedQuestions?: string[];
@@ -68,9 +96,11 @@ async function persistChatActivity({
         provider,
         model,
         userMessage: sanitizeActivityText(userMessage),
+        userMessageCreatedAt,
         assistantMessage: assistantMessage
           ? sanitizeActivityText(assistantMessage)
           : undefined,
+        assistantMessageCreatedAt,
         assistantThinking: assistantThinking
           ? sanitizeActivityText(assistantThinking)
           : undefined,
@@ -113,7 +143,7 @@ async function persistAppLogActivity({
   level: "debug" | "info" | "warn" | "error";
   message: string;
   route: string;
-  metadata?: Record<string, string | number | boolean | null>;
+  metadata?: Record<string, unknown>;
 }) {
   if (!actor) return;
 
@@ -128,7 +158,7 @@ async function persistAppLogActivity({
         level,
         message: sanitizeActivityText(message, 1000),
         route,
-        metadata,
+        metadata: metadata ? sanitizeActivityMetadata(metadata) : undefined,
       },
     });
   } catch (err) {
@@ -264,6 +294,7 @@ const chatRequestSchema = z.object({
       z.object({
         role: z.enum(["user", "assistant", "system"]),
         content: z.string().min(1).max(8000),
+        timestamp: z.string().optional(),
       }),
     )
     .min(1),
@@ -353,10 +384,37 @@ export async function POST(req: Request) {
       ? model
       : llmConfig.model;
 
-  const latestMessage = messages[messages.length - 1].content;
+  const latestMessageItem = messages[messages.length - 1];
+  const latestMessage = latestMessageItem.content;
+  const userMessageCreatedAt = latestMessageItem.timestamp ?? new Date().toISOString();
 
   console.log("📝 Latest Query:", latestMessage);
   measureTime("User Input Received");
+  await persistAppLogActivity({
+    actor,
+    level: "info",
+    route: "/api/chat",
+    message: "Chat request received",
+    metadata: {
+      messagesReceived: messages.length,
+      latestMessageLength: latestMessage.length,
+      requestedModel: model || null,
+      userMessageCreatedAt,
+    },
+  });
+  await persistAppLogActivity({
+    actor,
+    level: "info",
+    route: "/api/chat",
+    message: "LLM configuration resolved",
+    metadata: {
+      provider: llmConfig.provider,
+      model: resolvedModel,
+      requestedModel: model || null,
+      usedRequestedModel: Boolean(model && model === resolvedModel),
+      allowedModelCount: llmConfig.allowedModels.length,
+    },
+  });
 
   // Prepare debug data
   const MAX_DEBUG_LENGTH = 1000;
@@ -370,6 +428,17 @@ export async function POST(req: Request) {
   // Screen the input with the guardrail before any further processing.
   // Fails closed: any error calling the guardrail blocks the request.
   let inputGuardrail: GuardrailResult;
+  const inputGuardrailStart = performance.now();
+  await persistAppLogActivity({
+    actor,
+    level: "debug",
+    route: "/api/chat",
+    message: "Input guardrail check started",
+    metadata: {
+      guardrailConfigured: Boolean(tenant.guardrailId),
+      guardrailVersion: tenant.guardrailVersion || null,
+    },
+  });
   try {
     inputGuardrail = await applyGuardrail({
       text: latestMessage,
@@ -400,7 +469,9 @@ export async function POST(req: Request) {
       provider: llmConfig.provider,
       model: resolvedModel,
       userMessage: latestMessage,
+      userMessageCreatedAt,
       assistantMessage: guardrailFailureResponse.response,
+      assistantMessageCreatedAt: new Date().toISOString(),
       assistantThinking: guardrailFailureResponse.thinking,
       userMood: guardrailFailureResponse.user_mood,
       suggestedQuestions: guardrailFailureResponse.suggested_questions,
@@ -410,6 +481,18 @@ export async function POST(req: Request) {
     });
     return Response.json(guardrailFailureResponse, { status: 200 });
   }
+  await persistAppLogActivity({
+    actor,
+    level: inputGuardrail.blocked ? "warn" : "debug",
+    route: "/api/chat",
+    message: inputGuardrail.blocked
+      ? "Input guardrail blocked request"
+      : "Input guardrail check completed",
+    metadata: {
+      blocked: inputGuardrail.blocked,
+      durationMs: durationMs(inputGuardrailStart),
+    },
+  });
   if (inputGuardrail.blocked) {
     const blockedResponse = {
       id: crypto.randomUUID(),
@@ -424,7 +507,9 @@ export async function POST(req: Request) {
       provider: llmConfig.provider,
       model: resolvedModel,
       userMessage: latestMessage,
+      userMessageCreatedAt,
       assistantMessage: blockedResponse.response,
+      assistantMessageCreatedAt: new Date().toISOString(),
       assistantThinking: blockedResponse.thinking,
       userMood: blockedResponse.user_mood,
       suggestedQuestions: blockedResponse.suggested_questions,
@@ -448,6 +533,17 @@ export async function POST(req: Request) {
   let ragSources: RAGSource[] = [];
 
   // Attempt to retrieve context from RAG
+  const ragStart = performance.now();
+  await persistAppLogActivity({
+    actor,
+    level: "debug",
+    route: "/api/chat",
+    message: "RAG retrieval started",
+    metadata: {
+      knowledgeBaseId: tenant.knowledgeBaseId || null,
+      requestedResults: 3,
+    },
+  });
   try {
     console.log("🔍 Initiating RAG retrieval for query:", latestMessage);
     measureTime("RAG Start");
@@ -464,6 +560,24 @@ export async function POST(req: Request) {
     if (!result.isRagWorking) {
       console.warn("🚨 RAG Retrieval failed but did not throw!");
     }
+
+    await persistAppLogActivity({
+      actor,
+      level: result.isRagWorking ? "info" : "warn",
+      route: "/api/chat",
+      message: result.isRagWorking
+        ? "RAG retrieval completed"
+        : "RAG retrieval returned no usable context",
+      metadata: {
+        contextUsed: result.isRagWorking,
+        sourceCount: ragSources.length,
+        durationMs: durationMs(ragStart),
+        sourceFiles:
+          ragSources
+            .map((source) => `${source.fileName}:${source.score.toFixed(3)}`)
+            .join(", ") || null,
+      },
+    });
 
     measureTime("RAG Complete");
     console.log("🔍 RAG Retrieved:", isRagWorking ? "YES" : "NO");
@@ -583,6 +697,21 @@ export async function POST(req: Request) {
     console.log(`🚀 Query Processing`);
     measureTime("Claude Generation Start");
 
+    const generationStart = performance.now();
+    await persistAppLogActivity({
+      actor,
+      level: "debug",
+      route: "/api/chat",
+      message: "LLM generation started",
+      metadata: {
+        provider: llmConfig.provider,
+        model: resolvedModel,
+        messageCount: messages.length + 1,
+        contextUsed: isRagWorking,
+        sourceCount: ragSources.length,
+      },
+    });
+
     const litellmMessages: ChatMessage[] = [
       { role: "system", content: systemPrompt },
       ...messages.map((msg: any) => ({ role: msg.role, content: msg.content })),
@@ -597,6 +726,17 @@ export async function POST(req: Request) {
 
     measureTime("Claude Generation Complete");
     console.log("✅ Message generation completed");
+    await persistAppLogActivity({
+      actor,
+      level: "info",
+      route: "/api/chat",
+      message: "LLM generation completed",
+      metadata: {
+        provider: llmConfig.provider,
+        model: resolvedModel,
+        durationMs: durationMs(generationStart),
+      },
+    });
 
     const textContent = response.choices[0].message.content ?? "";
 
@@ -610,10 +750,33 @@ export async function POST(req: Request) {
     }
 
     const validatedResponse = responseSchema.parse(parsedResponse);
+    await persistAppLogActivity({
+      actor,
+      level: "debug",
+      route: "/api/chat",
+      message: "LLM response parsed",
+      metadata: {
+        responseLength: validatedResponse.response.length,
+        thinkingLength: validatedResponse.thinking.length,
+        suggestedQuestionCount: validatedResponse.suggested_questions.length,
+        matchedCategoryCount: validatedResponse.matched_categories?.length ?? 0,
+      },
+    });
     let outputGuardrailBlocked = false;
 
     // Screen the output with the guardrail. Fails open: an error calling
     // the guardrail does not block an already-generated response.
+    const outputGuardrailStart = performance.now();
+    await persistAppLogActivity({
+      actor,
+      level: "debug",
+      route: "/api/chat",
+      message: "Output guardrail check started",
+      metadata: {
+        guardrailConfigured: Boolean(tenant.guardrailId),
+        guardrailVersion: tenant.guardrailVersion || null,
+      },
+    });
     try {
       const outputGuardrail = await applyGuardrail({
         text: validatedResponse.response,
@@ -636,6 +799,18 @@ export async function POST(req: Request) {
         metadata: { error: sanitizeActivityText(err, 1000) },
       });
     }
+    await persistAppLogActivity({
+      actor,
+      level: outputGuardrailBlocked ? "warn" : "debug",
+      route: "/api/chat",
+      message: outputGuardrailBlocked
+        ? "Output guardrail blocked response"
+        : "Output guardrail check completed",
+      metadata: {
+        blocked: outputGuardrailBlocked,
+        durationMs: durationMs(outputGuardrailStart),
+      },
+    });
 
     const responseWithId = {
       id: crypto.randomUUID(),
@@ -653,7 +828,9 @@ export async function POST(req: Request) {
       provider: llmConfig.provider,
       model: resolvedModel,
       userMessage: latestMessage,
+      userMessageCreatedAt,
       assistantMessage: responseWithId.response,
+      assistantMessageCreatedAt: new Date().toISOString(),
       assistantThinking: responseWithId.thinking,
       userMood: responseWithId.user_mood,
       suggestedQuestions: responseWithId.suggested_questions,
@@ -677,6 +854,7 @@ export async function POST(req: Request) {
         redirectToAgent: Boolean(
           responseWithId.redirect_to_agent?.should_redirect,
         ),
+        durationMs: durationMs(apiStart),
       },
     });
 
@@ -724,7 +902,9 @@ export async function POST(req: Request) {
       provider: llmConfig.provider,
       model: resolvedModel,
       userMessage: latestMessage,
+      userMessageCreatedAt,
       assistantMessage: errorResponse.response,
+      assistantMessageCreatedAt: new Date().toISOString(),
       assistantThinking: errorResponse.thinking,
       userMood: errorResponse.user_mood,
       contextUsed: false,

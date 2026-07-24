@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -23,12 +23,16 @@ type IngestionStatus = {
 const TERMINAL_STATUSES = new Set(["COMPLETE", "FAILED"]);
 const POLL_INTERVAL_MS = 5000;
 
+type UploadableFile = File & { webkitRelativePath?: string };
+
 export default function KnowledgeBaseManager() {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
 
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
-  const [uploadedKey, setUploadedKey] = useState<string | null>(null);
+  const [uploadedKeys, setUploadedKeys] = useState<string[]>([]);
+  const [uploadProgress, setUploadProgress] = useState<string | null>(null);
   const [isShared, setIsShared] = useState(false);
 
   const [jobId, setJobId] = useState<string | null>(null);
@@ -36,41 +40,92 @@ export default function KnowledgeBaseManager() {
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
 
+
+  useEffect(() => {
+    folderInputRef.current?.setAttribute("webkitdirectory", "");
+    folderInputRef.current?.setAttribute("directory", "");
+  }, []);
+
+  function selectedFiles(): UploadableFile[] {
+    return [
+      ...Array.from(fileInputRef.current?.files ?? []),
+      ...Array.from(folderInputRef.current?.files ?? []),
+    ] as UploadableFile[];
+  }
+
+  function clearSelectedFiles() {
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    if (folderInputRef.current) folderInputRef.current.value = "";
+  }
+
+  function flattenedUploadName(file: UploadableFile): string {
+    const base = file.name.split(/[/\\]/).pop() || "file";
+    return base.replace(/[^a-zA-Z0-9._-]/g, "_") || "file";
+  }
+
+  function uploadIdentity(file: UploadableFile, index: number): string {
+    const sourcePath = file.webkitRelativePath || file.name;
+    return `${sourcePath}:${file.size}:${file.lastModified}:${index}`;
+  }
+
   async function handleUpload() {
-    const file = fileInputRef.current?.files?.[0];
-    if (!file) return;
+    const files = selectedFiles();
+    if (files.length === 0) return;
 
     setUploadError(null);
-    setUploadedKey(null);
+    setUploadedKeys([]);
+    setUploadProgress(null);
     setIsUploading(true);
 
+    const uploaded: string[] = [];
+
     try {
-      const res = await fetch("/api/admin/kb/upload-url", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filename: file.name }),
-      });
+      const nameCounts = files.reduce<Record<string, number>>((counts, file) => {
+        const name = flattenedUploadName(file);
+        counts[name] = (counts[name] || 0) + 1;
+        return counts;
+      }, {});
 
-      if (!res.ok) {
-        const data = await res.json().catch(() => null);
-        throw new Error(
-          typeof data?.error === "string" ? data.error : "Failed to get upload URL.",
-        );
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index];
+        const sourcePath = file.webkitRelativePath || file.name;
+        const flattenedName = flattenedUploadName(file);
+        const dedupeKey =
+          nameCounts[flattenedName] > 1 ? uploadIdentity(file, index) : undefined;
+        setUploadProgress(`Uploading ${index + 1} of ${files.length}: ${sourcePath}`);
+
+        const res = await fetch("/api/admin/kb/upload-url", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ filename: file.name, dedupeKey }),
+        });
+
+        if (!res.ok) {
+          const data = await res.json().catch(() => null);
+          throw new Error(
+            typeof data?.error === "string"
+              ? data.error
+              : `Failed to get upload URL for ${sourcePath}.`,
+          );
+        }
+
+        const { uploadUrl, key, isShared: shared } = await res.json();
+
+        const putRes = await fetch(uploadUrl, { method: "PUT", body: file });
+        if (!putRes.ok) {
+          throw new Error(`Upload to S3 failed for ${sourcePath}.`);
+        }
+
+        uploaded.push(key);
+        setUploadedKeys([...uploaded]);
+        setIsShared(shared);
       }
 
-      const { uploadUrl, key, isShared: shared } = await res.json();
-
-      const putRes = await fetch(uploadUrl, { method: "PUT", body: file });
-      if (!putRes.ok) {
-        throw new Error("Upload to S3 failed.");
-      }
-
-      setUploadedKey(key);
-      setIsShared(shared);
-      if (fileInputRef.current) fileInputRef.current.value = "";
+      clearSelectedFiles();
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : "Upload failed.");
     } finally {
+      setUploadProgress(null);
       setIsUploading(false);
     }
   }
@@ -112,9 +167,10 @@ export default function KnowledgeBaseManager() {
     <div className="flex flex-col gap-6">
       <Card>
         <CardHeader>
-          <CardTitle>Upload a document</CardTitle>
+          <CardTitle>Upload documents</CardTitle>
           <CardDescription>
-            Add a new document to your organization&apos;s knowledge base.
+            Add one or more files, or a local folder, to your organization&apos;s
+            knowledge base.
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
@@ -125,22 +181,38 @@ export default function KnowledgeBaseManager() {
               chat as well.
             </p>
           )}
-          <input
-            ref={fileInputRef}
-            type="file"
-            className="text-sm"
-          />
+          <div className="flex flex-col gap-3">
+            <label className="flex flex-col gap-1 text-sm">
+              <span className="font-medium">Files</span>
+              <input ref={fileInputRef} type="file" multiple disabled={isUploading} className="text-sm" />
+            </label>
+            <label className="flex flex-col gap-1 text-sm">
+              <span className="font-medium">Folder</span>
+              <input ref={folderInputRef} type="file" multiple disabled={isUploading} className="text-sm" />
+            </label>
+          </div>
           {uploadError && (
             <p className="text-sm text-destructive">{uploadError}</p>
           )}
-          {uploadedKey && !uploadError && (
-            <p className="text-sm text-muted-foreground">
-              Uploaded <span className="font-mono">{uploadedKey}</span>. Run a
-              sync below to make it searchable.
-            </p>
+          {uploadProgress && (
+            <p className="text-sm text-muted-foreground">{uploadProgress}</p>
+          )}
+          {uploadedKeys.length > 0 && !uploadError && (
+            <div className="text-sm text-muted-foreground">
+              <p>
+                Uploaded {uploadedKeys.length} item
+                {uploadedKeys.length === 1 ? "" : "s"}. Run a sync below to
+                make them searchable.
+              </p>
+              <ul className="mt-2 max-h-32 list-disc overflow-y-auto pl-5 font-mono text-xs">
+                {uploadedKeys.map((key) => (
+                  <li key={key}>{key}</li>
+                ))}
+              </ul>
+            </div>
           )}
           <Button onClick={handleUpload} disabled={isUploading} className="w-fit">
-            {isUploading ? "Uploading..." : "Upload"}
+            {isUploading ? "Uploading..." : "Upload selected"}
           </Button>
         </CardContent>
       </Card>

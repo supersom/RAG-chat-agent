@@ -172,3 +172,10 @@ While drafting the plan's deployment task, I quoted the live output of `aws ampl
 
 **Status:** Implemented locally and verified with typecheck and lint. Not pushed; no Amplify deploy triggered.
 
+## 2026-07-24 — Rich activity logs, message timestamps, and multi-document KB upload
+
+**Context:** Activity Logs were missing much of the lifecycle detail that still appeared in CloudWatch, chat messages had no durable timestamps, and `/admin/knowledge-base` only supported uploading a single file at a time.
+
+**Decision:** Add structured `app_log` records throughout `/api/chat` for request receipt, LLM config resolution, input/output guardrail checks, RAG retrieval, LLM generation, response parsing, and completion timing. Chat turns now persist separate user/assistant message timestamps and the chat UI renders them when hydrating from activity history. The knowledge-base admin upload UI now supports multi-file selection plus local folder selection, uploads every selected item, flattens S3 keys to sanitized filenames, and adds a six-character hash suffix only when a selected batch would otherwise collide after flattening.
+
+**Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck`, `npm run lint`, and `npm test`. Not pushed; no Amplify deploy triggered.

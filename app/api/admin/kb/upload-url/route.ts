@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import crypto from "crypto";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { auth } from "@/auth";
@@ -8,14 +9,26 @@ import { getKbDataSource } from "@/app/lib/bedrock-kb";
 
 const requestSchema = z.object({
   filename: z.string().min(1).max(255),
+  dedupeKey: z.string().min(1).max(1024).optional(),
 });
 
-// Strip path separators and anything but a conservative safe set so the
-// admin-supplied filename can't be used to write outside the intended key,
-// or collide with control characters in S3 tooling.
 function sanitizeFilename(filename: string): string {
   const base = filename.split(/[/\\]/).pop() || "file";
-  return base.replace(/[^a-zA-Z0-9._-]/g, "_");
+  return base.replace(/[^a-zA-Z0-9._-]/g, "_") || "file";
+}
+
+function addHashSuffix(filename: string, dedupeKey?: string): string {
+  if (!dedupeKey) return filename;
+
+  const hash = crypto
+    .createHash("sha256")
+    .update(dedupeKey)
+    .digest("hex")
+    .slice(0, 6);
+  const lastDot = filename.lastIndexOf(".");
+  if (lastDot <= 0) return `${filename}-${hash}`;
+
+  return `${filename.slice(0, lastDot)}-${hash}${filename.slice(lastDot)}`;
 }
 
 export async function POST(req: Request) {
@@ -46,7 +59,10 @@ export async function POST(req: Request) {
     );
   }
 
-  const key = sanitizeFilename(parsed.data.filename);
+  const key = addHashSuffix(
+    sanitizeFilename(parsed.data.filename),
+    parsed.data.dedupeKey,
+  );
 
   const client = new S3Client({
     region: process.env.AWS_REGION || process.env.BAWS_REGION || "us-east-1",

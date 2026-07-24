@@ -52,7 +52,9 @@ export interface ActivityRecord {
     model: string;
     provider: ActivityLlmProvider;
     userMessage: string;
+    userMessageCreatedAt?: string;
     assistantMessage?: string;
+    assistantMessageCreatedAt?: string;
     assistantThinking?: string;
     userMood?: string;
     suggestedQuestions?: string[];
