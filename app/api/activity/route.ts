@@ -3,10 +3,10 @@ import {
   getActivityForTenant,
   getActivityForTenantUser,
 } from "@/app/lib/db/activity";
-import { getUserById } from "@/app/lib/db/users";
 import {
   ActivityAccessError,
   filterVisibleActivitiesForRole,
+  resolveActivityLogReadScope,
   resolveActivityReadScope,
 } from "@/app/lib/activity-scope";
 
@@ -27,35 +27,41 @@ export async function GET(req: Request) {
   const requestedUserId = url.searchParams.get("userId");
   const before = url.searchParams.get("before") || undefined;
   const limit = parseLimit(url.searchParams.get("limit"));
-  const requestedUser =
-    session.user.role === "admin" && requestedUserId
-      ? await getUserById(requestedUserId)
-      : null;
+  const kind = url.searchParams.get("kind");
+  const sessionUser = {
+    id: session.user.id,
+    role: session.user.role,
+    tenantId: session.user.tenantId,
+  };
 
   try {
+    if (kind === "app_log") {
+      const scope = resolveActivityLogReadScope({ sessionUser });
+      const activities = await getActivityForTenant({
+        tenantId: scope.tenantId,
+        limit,
+        before,
+      });
+
+      return Response.json({
+        activities: filterVisibleActivitiesForRole(
+          session.user.role,
+          activities,
+        ).filter((activity) => activity.kind === "app_log"),
+      });
+    }
+
     const scope = resolveActivityReadScope({
-      sessionUser: {
-        id: session.user.id,
-        role: session.user.role,
-        tenantId: session.user.tenantId,
-      },
+      sessionUser,
       requestedUserId,
-      requestedUser,
     });
 
-    const activities =
-      scope.kind === "tenant"
-        ? await getActivityForTenant({
-            tenantId: scope.tenantId,
-            limit,
-            before,
-          })
-        : await getActivityForTenantUser({
-            tenantId: scope.tenantId,
-            userId: scope.userId,
-            limit,
-            before,
-          });
+    const activities = await getActivityForTenantUser({
+      tenantId: scope.tenantId,
+      userId: scope.userId,
+      limit,
+      before,
+    });
 
     return Response.json({
       activities: filterVisibleActivitiesForRole(session.user.role, activities),

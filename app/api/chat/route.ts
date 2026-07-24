@@ -432,6 +432,13 @@ export async function POST(req: Request) {
       ragSources: [],
       guardrail: { inputBlocked: true },
     });
+    await persistAppLogActivity({
+      actor,
+      level: "warn",
+      route: "/api/chat",
+      message: "Chat turn blocked by input guardrail",
+      metadata: { provider: llmConfig.provider, model: resolvedModel },
+    });
     return Response.json(blockedResponse, { status: 200 });
   }
 
@@ -655,6 +662,22 @@ export async function POST(req: Request) {
       contextUsed: responseWithId.debug.context_used,
       ragSources,
       guardrail: { outputBlocked: outputGuardrailBlocked },
+    });
+    await persistAppLogActivity({
+      actor,
+      level: "info",
+      route: "/api/chat",
+      message: "Chat turn completed",
+      metadata: {
+        provider: llmConfig.provider,
+        model: resolvedModel,
+        contextUsed: responseWithId.debug.context_used,
+        sourceCount: ragSources.length,
+        outputGuardrailBlocked,
+        redirectToAgent: Boolean(
+          responseWithId.redirect_to_agent?.should_redirect,
+        ),
+      },
     });
 
     // Prepare the response object

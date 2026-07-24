@@ -1,4 +1,4 @@
-import { ActivityRecord, User } from "@/app/lib/db/schema";
+import { ActivityRecord } from "@/app/lib/db/schema";
 
 export type ActivitySessionUser = {
   id: string;
@@ -6,9 +6,13 @@ export type ActivitySessionUser = {
   tenantId: string;
 };
 
-export type ActivityReadScope =
-  | { kind: "tenant"; tenantId: string }
-  | { kind: "tenant_user"; tenantId: string; userId: string };
+export type ActivityReadScope = {
+  kind: "tenant_user";
+  tenantId: string;
+  userId: string;
+};
+
+export type ActivityLogReadScope = { kind: "tenant_logs"; tenantId: string };
 
 export class ActivityAccessError extends Error {
   constructor(
@@ -22,39 +26,32 @@ export class ActivityAccessError extends Error {
 export function resolveActivityReadScope({
   sessionUser,
   requestedUserId,
-  requestedUser,
 }: {
   sessionUser: ActivitySessionUser;
   requestedUserId?: string | null;
-  requestedUser?: Pick<User, "userId" | "tenantId"> | null;
 }): ActivityReadScope {
-  if (sessionUser.role !== "admin") {
-    if (requestedUserId && requestedUserId !== sessionUser.id) {
-      throw new ActivityAccessError(403, "Forbidden");
-    }
-    return {
-      kind: "tenant_user",
-      tenantId: sessionUser.tenantId,
-      userId: sessionUser.id,
-    };
-  }
-
-  if (!requestedUserId) {
-    return { kind: "tenant", tenantId: sessionUser.tenantId };
-  }
-
-  if (!requestedUser || requestedUser.tenantId !== sessionUser.tenantId) {
-    // Do not reveal whether a cross-tenant user id exists.
-    throw new ActivityAccessError(404, "User not found");
+  if (requestedUserId && requestedUserId !== sessionUser.id) {
+    throw new ActivityAccessError(403, "Forbidden");
   }
 
   return {
     kind: "tenant_user",
     tenantId: sessionUser.tenantId,
-    userId: requestedUser.userId,
+    userId: sessionUser.id,
   };
 }
 
+export function resolveActivityLogReadScope({
+  sessionUser,
+}: {
+  sessionUser: ActivitySessionUser;
+}): ActivityLogReadScope {
+  if (sessionUser.role !== "admin") {
+    throw new ActivityAccessError(403, "Forbidden");
+  }
+
+  return { kind: "tenant_logs", tenantId: sessionUser.tenantId };
+}
 
 export function filterVisibleActivitiesForRole(
   role: "admin" | "end_user",

@@ -72,7 +72,7 @@ export async function retrieveContext(
           score: result.score || 0,
         };
       })
-      .slice(0, 1);
+      .slice(0, n);
 
     console.log("🔍 Parsed RAG Sources:", ragSources); // Debug log
 

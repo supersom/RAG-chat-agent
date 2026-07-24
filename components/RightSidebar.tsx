@@ -209,7 +209,7 @@ const RightSidebar: React.FC = () => {
     const fetchLogs = async () => {
       setLogsLoading(true);
       try {
-        const res = await fetch("/api/activity?limit=100");
+        const res = await fetch("/api/activity?kind=app_log&limit=100");
         const data = await res.json();
         if (cancelled) return;
         if (data.error) {

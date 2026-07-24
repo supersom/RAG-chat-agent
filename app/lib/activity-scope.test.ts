@@ -3,6 +3,7 @@ import { ActivityRecord } from "./db/schema";
 import {
   ActivityAccessError,
   filterVisibleActivitiesForRole,
+  resolveActivityLogReadScope,
   resolveActivityReadScope,
 } from "./activity-scope";
 
@@ -28,39 +29,45 @@ describe("resolveActivityReadScope", () => {
     ).toThrow(new ActivityAccessError(403, "Forbidden"));
   });
 
-  it("lets admins read the tenant-wide feed for only their tenant", () => {
+  it("scopes admins to their own chat records by default", () => {
     const scope = resolveActivityReadScope({
       sessionUser: { id: "admin-a", role: "admin", tenantId: "tenant-a" },
-    });
-
-    expect(scope).toEqual({ kind: "tenant", tenantId: "tenant-a" });
-  });
-
-  it("lets admins filter to a user in their own tenant", () => {
-    const scope = resolveActivityReadScope({
-      sessionUser: { id: "admin-a", role: "admin", tenantId: "tenant-a" },
-      requestedUserId: "user-a",
-      requestedUser: { userId: "user-a", tenantId: "tenant-a" },
     });
 
     expect(scope).toEqual({
       kind: "tenant_user",
       tenantId: "tenant-a",
-      userId: "user-a",
+      userId: "admin-a",
     });
   });
 
-  it("does not let admins filter to a user from another tenant", () => {
+  it("cuts partial admin browsing of another user's chat records", () => {
     expect(() =>
       resolveActivityReadScope({
         sessionUser: { id: "admin-a", role: "admin", tenantId: "tenant-a" },
-        requestedUserId: "user-b",
-        requestedUser: { userId: "user-b", tenantId: "tenant-b" },
+        requestedUserId: "user-a",
       }),
-    ).toThrow(new ActivityAccessError(404, "User not found"));
+    ).toThrow(new ActivityAccessError(403, "Forbidden"));
   });
 });
 
+describe("resolveActivityLogReadScope", () => {
+  it("lets admins read tenant-scoped app logs", () => {
+    expect(
+      resolveActivityLogReadScope({
+        sessionUser: { id: "admin-a", role: "admin", tenantId: "tenant-a" },
+      }),
+    ).toEqual({ kind: "tenant_logs", tenantId: "tenant-a" });
+  });
+
+  it("blocks end users from tenant app logs", () => {
+    expect(() =>
+      resolveActivityLogReadScope({
+        sessionUser: { id: "user-a", role: "end_user", tenantId: "tenant-a" },
+      }),
+    ).toThrow(new ActivityAccessError(403, "Forbidden"));
+  });
+});
 
 describe("filterVisibleActivitiesForRole", () => {
   const activities = [
@@ -69,7 +76,9 @@ describe("filterVisibleActivitiesForRole", () => {
   ] as ActivityRecord[];
 
   it("keeps app logs visible to admins", () => {
-    expect(filterVisibleActivitiesForRole("admin", activities)).toEqual(activities);
+    expect(filterVisibleActivitiesForRole("admin", activities)).toEqual(
+      activities,
+    );
   });
 
   it("hides app logs from end users", () => {

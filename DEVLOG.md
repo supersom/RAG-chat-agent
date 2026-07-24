@@ -156,3 +156,11 @@ While drafting the plan's deployment task, I quoted the live output of `aws ampl
 
 **Status:** Amplify job 7 succeeded for `25d24e3`. `CustomerSupportAgent-Activity` and `tenantUserId-createdAt-index` are ACTIVE, TTL is enabled, the app homepage returns 200, and unauthenticated `/api/activity` returns 401 as expected.
 
+## 2026-07-24 — Activity history follow-up fixes
+
+**Context:** After deploying persistent activity history, three behavior gaps surfaced: the Knowledge Base sidebar showed only one source even when Bedrock retrieved multiple relevant chunks, Activity Logs appeared empty on normal successful chats, and the admin activity API exposed a partial/non-UI-backed path for browsing other users' chat records.
+
+**Decision:** Return up to the requested number of RAG sources from `retrieveContext()` instead of slicing to one. Write a sanitized `app_log` record for successful chat turns and guardrail blocks so the admin Activity Logs tab has tenant-scoped events without exposing chat text. Cut the partial admin chat-record browsing path from `/api/activity`: normal activity reads are scoped to the signed-in user's own chat records for both admins and end users, while admins can request `kind=app_log` for tenant-wide sanitized app logs.
+
+**Status:** Implemented locally and verified with typecheck, lint, and the full Vitest suite. Not pushed; no Amplify deploy triggered.
+
