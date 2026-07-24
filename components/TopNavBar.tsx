@@ -1,8 +1,11 @@
 "use client";
+import Link from "next/link";
 import React, { useState, useEffect } from "react";
+import { useSession } from "next-auth/react";
 import { Button } from "@/components/ui/button";
-import { Moon, Sun, Check } from "lucide-react";
+import { Moon, Sun, Check, Settings } from "lucide-react";
 import SettingsModal from "@/components/SettingsModal";
+import { LogoutButton } from "@/components/LogoutButton";
 import { useTheme } from "next-themes";
 import { themes } from "@/styles/themes";
 import {
@@ -44,9 +47,12 @@ const ColorCircle = ({
 );
 
 const TopNavBar = () => {
+  const { data: session, status } = useSession();
   const { theme, setTheme } = useTheme();
   const [colorTheme, setColorTheme] = useState<ThemeName>("neutral");
   const [mounted, setMounted] = useState(false);
+  const isAuthenticated = status === "authenticated";
+  const isAdmin = session?.user?.role === "admin";
 
   useEffect(() => {
     setMounted(true);
@@ -91,7 +97,16 @@ const TopNavBar = () => {
           S<span className="text-primary">om</span>
         </span>
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        {isAuthenticated && isAdmin && (
+          <Button asChild variant="outline" size="sm">
+            <Link href="/admin" className="gap-2">
+              <Settings className="h-4 w-4" />
+              Manage
+            </Link>
+          </Button>
+        )}
+        {isAuthenticated && <LogoutButton />}
         <SettingsModal />
         <DropdownMenu>
           <DropdownMenuTrigger asChild>

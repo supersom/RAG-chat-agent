@@ -107,3 +107,11 @@ While drafting the plan's deployment task, I quoted the live output of `aws ampl
 **Status:** PR #3 open (https://github.com/supersom/RAG-chat-agent/pull/3), branch pushed clean, live-verified against preview app `d2l47euepvccx6`: admin UI renders provider/API-key fields, saved keys are never re-exposed to the client (confirmed via accessibility-tree inspection, not just visual masking), chat correctly routes to the tenant's own provider using their own key (Anthropic-specific auth error confirmed the routing, not just a generic failure), and clearing the key correctly falls back to the main app's defaults.
 
 **Takeaway:** never inline live-fetched command output (`aws ... get-*`, `kubectl get -o yaml`, etc.) directly into a committed file, even a plan/spec doc meant only to describe *what command to run* — use a placeholder and a "fetch fresh before running" note instead. And in a shared-`.git` worktree setup, `git-filter-repo`'s repo-wide default makes it the *wrong* tool for a scoped fix, even though it's the generally-recommended replacement for `filter-branch` in a normal single-checkout repo.
+
+## 2026-07-24 — Main app auth actions surfaced in the chat nav
+
+**Context:** After adding admin/end-user auth flows, the main chat surface still did not expose session actions directly. Admins had to know to navigate to `/admin`, and logged-in users did not have a visible logout control on the main app.
+
+**Decision:** Add role-aware actions to `components/TopNavBar.tsx`: admins see `Manage` (links to `/admin`) and `Log out`; end users see `Log out`; logged-out visitors see no new auth action. Reused `components/LogoutButton.tsx` so logout behavior stays consistent with the admin layout, and added a small logout icon for recognizability.
+
+**Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck` and `npm run lint`. Not pushed; no Amplify deploy triggered.
