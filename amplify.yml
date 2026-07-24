@@ -6,7 +6,7 @@ frontend:
         - npm ci --cache .npm --prefer-offline
     build:
       commands:
-        - echo "AUTH_URL=https://${AWS_BRANCH}.${AWS_APP_ID}.amplifyapp.com" >> .env.production
+        - echo "AUTH_URL=${AUTH_URL:-https://${AWS_BRANCH}.${AWS_APP_ID}.amplifyapp.com}" >> .env.production
         - echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" >> .env.production
         - echo "AUTH_SECRET=$AUTH_SECRET" >> .env.production
         - echo "BAWS_ACCESS_KEY_ID=$BAWS_ACCESS_KEY_ID" >> .env.production
