@@ -5,6 +5,7 @@ import { useSession } from "next-auth/react";
 import { Button } from "@/components/ui/button";
 import { Moon, Sun, Check, Settings } from "lucide-react";
 import SettingsModal from "@/components/SettingsModal";
+import { getTenantToken } from "@/app/lib/tenant-client";
 import { LogoutButton } from "@/components/LogoutButton";
 import { useTheme } from "next-themes";
 import { themes } from "@/styles/themes";
@@ -26,6 +27,25 @@ const themeColors = {
 } as const;
 
 type ThemeName = keyof typeof themes;
+
+function decodeTenantIdFromToken(token: string | null): string | null {
+  if (!token) return null;
+
+  const payload = token.split(".")[1];
+  if (!payload) return null;
+
+  try {
+    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(
+      normalized.length + ((4 - (normalized.length % 4)) % 4),
+      "=",
+    );
+    const claims = JSON.parse(window.atob(padded));
+    return typeof claims.tenantId === "string" ? claims.tenantId : null;
+  } catch {
+    return null;
+  }
+}
 
 const ColorCircle = ({
   themeName,
@@ -51,8 +71,22 @@ const TopNavBar = () => {
   const { theme, setTheme } = useTheme();
   const [colorTheme, setColorTheme] = useState<ThemeName>("neutral");
   const [mounted, setMounted] = useState(false);
+  const [anonymousTenantId, setAnonymousTenantId] = useState<string | null>(
+    null,
+  );
   const isAuthenticated = status === "authenticated";
   const isAdmin = session?.user?.role === "admin";
+  const displayName = isAuthenticated
+    ? session.user.name || session.user.email || session.user.id
+    : "Anon";
+  const roleLabel = isAuthenticated
+    ? session.user.role === "admin"
+      ? "Admin"
+      : "User"
+    : "Anon";
+  const tenantId = isAuthenticated
+    ? session.user.tenantId
+    : anonymousTenantId || "No tenant";
 
   useEffect(() => {
     setMounted(true);
@@ -61,6 +95,15 @@ const TopNavBar = () => {
     setColorTheme(savedColorTheme);
     applyTheme(savedColorTheme, theme === "dark");
   }, [theme]);
+
+  useEffect(() => {
+    if (!mounted || isAuthenticated) {
+      setAnonymousTenantId(null);
+      return;
+    }
+
+    setAnonymousTenantId(decodeTenantIdFromToken(getTenantToken()));
+  }, [isAuthenticated, mounted]);
 
   const applyTheme = (newColorTheme: ThemeName, isDark: boolean) => {
     const root = document.documentElement;
@@ -98,6 +141,14 @@ const TopNavBar = () => {
         </span>
       </div>
       <div className="flex flex-wrap items-center justify-end gap-2">
+        <div className="flex min-w-0 max-w-[260px] flex-col items-end leading-tight">
+          <span className="max-w-[220px] truncate text-sm font-medium">
+            {displayName}
+          </span>
+          <span className="max-w-[260px] truncate text-xs text-muted-foreground">
+            {roleLabel} / tenant {tenantId}
+          </span>
+        </div>
         {isAuthenticated && isAdmin && (
           <Button asChild variant="outline" size="sm">
             <Link href="/admin" className="gap-2">

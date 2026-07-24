@@ -164,3 +164,11 @@ While drafting the plan's deployment task, I quoted the live output of `aws ampl
 
 **Status:** Implemented locally and verified with typecheck, lint, and the full Vitest suite. Not pushed; no Amplify deploy triggered.
 
+## 2026-07-24 — Chat nav identity context
+
+**Context:** The chat screen should make the active actor and tenant obvious, especially while testing authenticated admin/end-user sessions versus anonymous embed-token sessions.
+
+**Decision:** Add a compact top-right identity block to `TopNavBar`. Authenticated sessions show the session name/email/id, role (`Admin` or `User`), and `session.user.tenantId`. Anonymous sessions show `Anon` and decode the tenant id from the same embed token source used by chat (`meta[name=tenant-token]`, `?t=`, or the development settings token).
+
+**Status:** Implemented locally and verified with typecheck and lint. Not pushed; no Amplify deploy triggered.
+
