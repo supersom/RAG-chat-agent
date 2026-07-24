@@ -11,6 +11,13 @@ type ChatMessage = {
   content: string;
 };
 
+function normalizeOpenRouterModel(model: string): string {
+  if (model === "auto" || model === "auto-beta") {
+    return `openrouter/${model}`;
+  }
+  return model;
+}
+
 async function generateCompletion({
   provider,
   apiKey,
@@ -51,6 +58,32 @@ async function generateCompletion({
     return {
       choices: [{ message: { content: textContent } }],
     };
+  }
+
+  if (provider === "openrouter") {
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+        ...(process.env.AUTH_URL ? { "HTTP-Referer": process.env.AUTH_URL } : {}),
+        ...(process.env.COMPANY_NAME ? { "X-Title": process.env.COMPANY_NAME } : {}),
+      },
+      body: JSON.stringify({
+        model: normalizeOpenRouterModel(model),
+        max_tokens: 1000,
+        messages,
+        temperature: 0.3,
+        response_format: { type: "json_object" },
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`OpenRouter request failed: ${response.status} ${errorText}`);
+    }
+
+    return response.json();
   }
 
   const { completion } = await import("litellm");
