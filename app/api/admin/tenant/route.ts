@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
 import { getTenant, updateTenant } from "@/app/lib/db/tenants";
+import { encryptApiKey } from "@/app/lib/tenant-secrets";
+import { redactTenant } from "@/app/lib/tenant-redact";
+import type { Tenant } from "@/app/lib/db/schema";
 
 const editableTenantSchema = z
   .object({
@@ -14,9 +17,10 @@ const editableTenantSchema = z
     awsRegion: z.string().optional(),
     llmProviderDefaults: z
       .object({
-        provider: z.string(),
-        model: z.string(),
+        provider: z.enum(["openai", "anthropic", "openrouter"]).optional(),
+        model: z.string().optional(),
         allowedModels: z.array(z.string()).optional(),
+        apiKey: z.string().nullable().optional(),
       })
       .optional(),
   })
@@ -36,7 +40,7 @@ export async function GET() {
     return Response.json({ error: "Tenant not found" }, { status: 404 });
   }
 
-  return NextResponse.json(tenant);
+  return NextResponse.json(redactTenant(tenant));
 }
 
 export async function PATCH(req: Request) {
@@ -58,7 +62,46 @@ export async function PATCH(req: Request) {
     );
   }
 
-  const updated = await updateTenant(session.user.tenantId, parsed.data);
+  const existing = await getTenant(session.user.tenantId);
+  if (!existing) {
+    return Response.json({ error: "Tenant not found" }, { status: 404 });
+  }
 
-  return NextResponse.json(updated);
+  const { llmProviderDefaults: patchDefaults, ...rest } = parsed.data;
+
+  let llmProviderDefaults: Tenant["llmProviderDefaults"] = existing.llmProviderDefaults;
+
+  if (patchDefaults) {
+    const { apiKey, ...fieldPatch } = patchDefaults;
+
+    const merged: NonNullable<Tenant["llmProviderDefaults"]> = {
+      ...(existing.llmProviderDefaults ?? {}),
+      ...fieldPatch,
+    };
+
+    if (apiKey === null || apiKey === "") {
+      delete merged.apiKeyCiphertext;
+    } else if (apiKey) {
+      merged.apiKeyCiphertext = encryptApiKey(apiKey);
+    }
+
+    if (merged.apiKeyCiphertext && (!merged.provider || !merged.model)) {
+      return NextResponse.json(
+        {
+          error:
+            "A provider and model must be set together with an API key.",
+        },
+        { status: 400 },
+      );
+    }
+
+    llmProviderDefaults = merged;
+  }
+
+  const updated = await updateTenant(session.user.tenantId, {
+    ...rest,
+    llmProviderDefaults,
+  });
+
+  return NextResponse.json(redactTenant(updated));
 }
