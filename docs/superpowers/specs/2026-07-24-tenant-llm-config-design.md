@@ -93,6 +93,14 @@ New `app/lib/tenant-secrets.ts`:
 - `PATCH` extends the zod schema with the provider enum and an optional,
   nullable `apiKey` string; after merging with the existing record, if the
   result has a key but is missing provider or model, respond 400.
+- The redaction (`apiKeyCiphertext` → `apiKeyConfigured: boolean`) must be a
+  single shared function, not just logic inside the API route:
+  `app/admin/page.tsx` is a Server Component that fetches the tenant via a
+  direct `getTenant()` call and passes it as a prop into the client-side
+  `TenantSettingsForm` — Next.js serializes Server→Client Component props
+  into the page payload exactly like an API response body, so the raw
+  ciphertext would otherwise leak to the browser through that path even
+  though the API route itself is correctly redacted.
 
 ## `/api/chat/route.ts`
 
