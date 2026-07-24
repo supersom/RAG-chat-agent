@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { Suspense, useState, type FormEvent } from "react";
+import { useSearchParams } from "next/navigation";
 import { signIn } from "next-auth/react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,7 +14,10 @@ import {
   CardFooter,
 } from "@/components/ui/card";
 
-export default function AdminLoginPage() {
+function LoginForm() {
+  const searchParams = useSearchParams();
+  const callbackUrl = searchParams.get("callbackUrl") || "/admin";
+
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -41,16 +45,16 @@ export default function AdminLoginPage() {
     // race the just-set session cookie, so middleware's auth check
     // sometimes runs before the cookie is visible to it and silently
     // bounces back here with no error shown.
-    window.location.href = "/admin";
+    window.location.href = callbackUrl;
   }
 
   return (
     <div className="flex flex-1 items-center justify-center p-4">
       <Card className="w-full max-w-sm">
         <CardHeader>
-          <CardTitle>Admin Login</CardTitle>
+          <CardTitle>Sign In</CardTitle>
           <CardDescription>
-            Sign in to manage your organization&apos;s assistant.
+            Sign in to continue.
           </CardDescription>
         </CardHeader>
         <form onSubmit={handleSubmit}>
@@ -91,5 +95,13 @@ export default function AdminLoginPage() {
         </form>
       </Card>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense>
+      <LoginForm />
+    </Suspense>
   );
 }

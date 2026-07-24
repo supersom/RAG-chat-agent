@@ -21,7 +21,7 @@ export default {
     },
   },
   pages: {
-    signIn: "/admin/login",
+    signIn: "/login",
   },
   secret: process.env.AUTH_SECRET,
 } satisfies NextAuthConfig;
