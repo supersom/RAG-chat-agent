@@ -43,6 +43,12 @@ export default async function AdminLayout({
           </div>
         </div>
         <div className="flex items-center gap-4">
+          <Link
+            href="/"
+            className="text-sm font-medium text-muted-foreground hover:text-foreground"
+          >
+            Go to Chat
+          </Link>
           {tenant && (
             <span className="text-xs text-muted-foreground">
               Viewing: <span className="font-medium">{tenant.name}</span>{" "}
