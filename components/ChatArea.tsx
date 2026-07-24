@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import config from "@/config";
 import { loadSettings } from "@/components/SettingsModal";
 import { getTenantToken } from "@/app/lib/tenant-client";
+import { parseModelList, type Model } from "@/app/lib/models";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import ReactMarkdown from "react-markdown";
@@ -184,12 +185,6 @@ const MessageContent = ({
   );
 };
 
-// Define a type for the model
-type Model = {
-  id: string;
-  name: string;
-};
-
 interface Message {
   id: string;
   role: string;
@@ -294,12 +289,7 @@ function ChatArea() {
 
   const uiSettings = loadSettings();
   const modelsSource = uiSettings.models || process.env.NEXT_PUBLIC_MODELS || "claude-haiku-4-5-20251001:Claude Haiku 4.5";
-  const models: Model[] = modelsSource
-    .split(",")
-    .map((entry) => {
-      const [id, ...nameParts] = entry.trim().split(":");
-      return { id, name: nameParts.join(":") };
-    });
+  const models: Model[] = parseModelList(modelsSource);
 
   const [selectedModel, setSelectedModel] = useState(models[0]?.id ?? "claude-haiku-4-5-20251001");
   const [showAvatar, setShowAvatar] = useState(false);
