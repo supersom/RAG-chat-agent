@@ -328,3 +328,17 @@ While drafting the plan's deployment task, I quoted the live output of `aws ampl
 
 **Status:** Implemented and unit-tested. Deploy and a full live corpus pass (checking for zero real timeouts end to end, not just absence of `DOMMatrix`/`fake worker` errors) is the next and hopefully final step in this chain.
 
+## 2026-07-25 03:04 PDT — Full PDF-extraction fix chain confirmed live: chain closed
+
+**Context:** Deployed the PDF size cap (commit `4358bdd`, Amplify job 20) and re-ran the live sync against `claude-qkstrt-kb` for several rounds. Progress climbed cleanly across the run (8 → 23 indexed, 522 → 1,147 chunks, `skippedObjectCount` 3 → 5 — the size cap catching the known-bad large PDFs) with no new errors added beyond the stale ones already carried over from before these fixes existed.
+
+**Verification:** CloudWatch across the deploy window showed round durations of **12,870ms / 12,876ms / 13,710ms / 14,858ms / 16,064ms** — all comfortably bounded near the 12s soft budget, nowhere close to the ~28-30s platform wall — and **zero** `"timed out"` events. Stopped the run by navigating away (same pattern as every other live check this session); confirmed via CloudWatch that no further rounds fired afterward (settled at 5, none after).
+
+**Status: this closes the PDF-extraction chain from the 01:36 PDT entry onward.** Four fixes, each confirmed live against the actual broken production environment rather than assumed from local testing (which repeatedly could not reproduce these bugs, since this sandbox's `@napi-rs/canvas` happens to work and its filesystem doesn't have Next's bundling gap):
+1. `DOMMatrix` polyfill (`b1390d6`) — 0 `DOMMatrix` errors, down from 600+.
+2. `pdf.worker.mjs` bundling fix (`f348538`) — 0 `fake worker` errors.
+3. Time budget tightened 20s→12s (`adf973a`) — necessary but insufficient alone.
+4. PDF size cap (`4358bdd`) — closed the gap fix #3 couldn't: a single pathological object's synchronous processing time, which no between-object budget can protect against.
+
+Remaining, not addressed and not blocking: the ~1,360-object corpus will take many more checkpointed rounds (12-16s each) to fully drain via repeated manual "Sync Knowledge Base" clicks or the UI's auto-resume; nothing currently triggers that to completion unattended. That's the pre-existing, still-open "async/background job" backlog item, now with a much healthier per-round cost than when it was first identified.
+

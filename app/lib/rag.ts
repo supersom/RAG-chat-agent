@@ -111,6 +111,7 @@ export async function retrieveContext(
     if (tenantId) {
       try {
         const dataSource = await getKbDataSource(knowledgeBaseId);
+        console.log("🔎 [debug] getKbDataSource result:", dataSource);
         if (dataSource) {
           keywordSources = await searchKeywordIndex({
             tenantId,
@@ -121,6 +122,7 @@ export async function retrieveContext(
             credentials,
             region,
           });
+          console.log("🔎 [debug] searchKeywordIndex returned", keywordSources.length, "rows for tenantId", tenantId);
         }
       } catch (err) {
         console.error("Keyword index search failed:", err);
