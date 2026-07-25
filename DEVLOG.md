@@ -227,3 +227,11 @@ While drafting the plan's deployment task, I quoted the live output of `aws ampl
 **Decision:** Keep recording the underlying generation/parse failure as an `app_log`, but return the fallback assistant message as HTTP 200 with a stable response id, empty suggestions/categories, no redirect, debug data, and any already-retrieved RAG source headers. The existing server-side fallback chat persistence remains in place, so failed generation attempts still produce durable user/assistant activity records for authenticated users.
 
 **Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck`, `npm run lint`, `npm test`, and `npm run build`. Not pushed; no Amplify deploy triggered.
+
+## 2026-07-24 — Compact chat history sent to `/api/chat`
+
+**Context:** Admin accounts hydrate durable chat history, and the client was sending the entire rendered history back to `/api/chat` on every new message. Large persisted assistant payloads can exceed the route schema's per-message size limit and fail validation before the handler logs `Latest Query`, producing an immediate client-side generic failure and no saved turn.
+
+**Decision:** Send a compact API conversation instead of the full UI history: keep only the last 12 useful messages, reduce assistant JSON payloads to their visible `response` text, cap each message at 7,000 characters, and log the compacted message count/character count in the browser console. `/api/chat` now logs validation issues before returning HTTP 400 so these failures are visible in CloudWatch.
+
+**Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck`, `npm run lint`, `npm test`, and `npm run build`. Not pushed; no Amplify deploy triggered.

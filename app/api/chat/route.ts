@@ -400,8 +400,15 @@ export async function POST(req: Request) {
   const measureTime = (label: string) => logTimestamp(label, apiStart);
 
   // Extract and validate data from the request body
-  const parseResult = chatRequestSchema.safeParse(await req.json());
+  const requestBody = await req.json();
+  const parseResult = chatRequestSchema.safeParse(requestBody);
   if (!parseResult.success) {
+    console.error("Invalid chat request", {
+      issues: parseResult.error.flatten(),
+      messageCount: Array.isArray(requestBody?.messages)
+        ? requestBody.messages.length
+        : null,
+    });
     return Response.json({ error: "Invalid request" }, { status: 400 });
   }
   const { messages, model, apiKey: clientApiKey } = parseResult.data;

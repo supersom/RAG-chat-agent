@@ -489,6 +489,32 @@ function ChatArea() {
     console.log(`⏱️ ${label}: ${duration.toFixed(2)}ms`);
   };
 
+  const apiMessageContent = (message: Message): string => {
+    if (message.role !== "assistant") return message.content;
+
+    try {
+      const parsed = JSON.parse(message.content);
+      return typeof parsed.response === "string" ? parsed.response : message.content;
+    } catch {
+      return message.content;
+    }
+  };
+
+  const buildApiMessages = (conversation: Message[]) => {
+    const maxMessages = 12;
+    const maxContentLength = 7000;
+
+    return conversation
+      .filter((message) => ["system", "user", "assistant"].includes(message.role))
+      .map((message) => ({
+        role: message.role as "system" | "user" | "assistant",
+        content: apiMessageContent(message).slice(0, maxContentLength),
+        timestamp: message.timestamp,
+      }))
+      .filter((message) => message.content.trim().length > 0)
+      .slice(-maxMessages);
+  };
+
   const handleSubmit = async (
     event: React.FormEvent<HTMLFormElement> | string,
   ) => {
@@ -537,6 +563,12 @@ function ChatArea() {
     try {
       console.log("➡️ Sending message to API:", userMessage.content);
       const startTime = performance.now();
+      const apiMessages = buildApiMessages([...messages, userMessage]);
+      console.log("➡️ Sending compacted conversation to API:", {
+        messageCount: apiMessages.length,
+        totalChars: apiMessages.reduce((sum, message) => sum + message.content.length, 0),
+      });
+
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: {
@@ -544,7 +576,7 @@ function ChatArea() {
           "x-tenant-token": getTenantToken() ?? "",
         },
         body: JSON.stringify({
-          messages: [...messages, userMessage],
+          messages: apiMessages,
           model: selectedModel,
           apiKey: uiSettings.llmApiKey || undefined,
         }),
@@ -571,7 +603,12 @@ function ChatArea() {
           );
           return;
         }
-        throw new Error(`API request failed with status ${response.status}`);
+        const errorBody = await response.json().catch(() => null);
+        throw new Error(
+          typeof errorBody?.error === "string"
+            ? `API request failed with status ${response.status}: ${errorBody.error}`
+            : `API request failed with status ${response.status}`,
+        );
       }
 
       const data = await response.json();
