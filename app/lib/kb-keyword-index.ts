@@ -578,7 +578,13 @@ function ftsMatchQuery(query: string): string | null {
   return tokens.map((token) => `"${token}"`).join(" OR ");
 }
 
-const DEFAULT_TIME_BUDGET_MS = 20_000;
+// Amplify Compute's real execution limit sits around 28-30s (observed live:
+// a 28,005ms round completed normally, the very next round was hard-killed
+// with "Request timed out"). The budget check only runs between objects, so
+// a single slow object (e.g. a multi-megabyte PDF) can push a round well
+// past a 20s soft budget before the next check - this leaves enough margin
+// for that overrun to still land safely under the real wall.
+const DEFAULT_TIME_BUDGET_MS = 12_000;
 
 export async function reconcileKeywordIndex({
   tenantId,

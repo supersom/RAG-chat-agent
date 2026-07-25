@@ -302,3 +302,15 @@ While drafting the plan's deployment task, I quoted the live output of `aws ampl
 
 **Status:** Implemented and unit-tested. This is now two layers of a genuinely multi-layered "pdfjs-dist doesn't work out of the box in a Next.js serverless bundle" problem, each fixed by the same technique (pre-populate the global pdfjs-dist checks before it tries its own broken resolution). Not treating this as a red flag to stop and reconsider architecture (per the "3+ fixes fail, question everything" heuristic) since each fix has *worked* at eliminating its specific error, not failed and required another attempt at the same problem — it's a legitimately layered compatibility gap, being unwound one confirmed layer at a time.
 
+## 2026-07-25 02:42 PDT — Worker fix live-verified (0 errors); tightened the checkpoint time budget after a genuine near-miss
+
+**Context:** Deployed the worker-handler fix (commit `f348538`, Amplify job 18) and re-ran the live sync. CloudWatch confirmed **zero** `fake worker` and **zero** `DOMMatrix` errors since this deploy — both pdfjs-dist bugs are genuinely fixed in the real broken Lambda runtime. The UI's error list still showed the two previously-known-failing PDFs, but those turned out to be stale entries: `reconcileKeywordIndex`'s checkpointing persists `run.errors` across resumed rounds, and this sync resumed a `reconcile_run`/`reconcile_queue` left over from the *previous* (pre-worker-fix) attempt, in which those two specific files had already been dequeued-with-error before the fix landed — they won't be retried until a genuinely fresh (non-resumed) listing cycle. Meanwhile 8 *new* files (not previously attempted) indexed successfully with 522 chunks in this run, which is the real signal.
+
+**A genuine new failure, not stale-data noise:** the resume chain stopped with "Failed to start sync" after CloudWatch showed a real platform-level `Request timed out - your application took too long to respond` — not our graceful 20s-budget checkpoint. The round immediately before it had already run **28,005ms**, right at the wall the original scaling bug's timeouts hit (`28,002ms`, twice, back in the 01:36 PDT entry). Root cause: the time-budget check only runs *between* objects, not preemptively during one — so a single slow object (a multi-megabyte PDF takes multiple seconds to download, parse, and chunk) can push a round well past a 20s soft budget before the loop gets another chance to check the clock, right up against the real ~28-30s wall with very little margin left.
+
+**Decision:** Lowered `DEFAULT_TIME_BUDGET_MS` from 20s to 12s — a one-line, evidence-based tuning change (not a new behavior), giving a large single-object overrun much more room before hitting the real limit. No test changes needed since all existing tests already pass `timeBudgetMs` explicitly rather than relying on the default.
+
+**Verification:** `npx tsc --noEmit`, `next lint`, full suite (51/51) all clean.
+
+**Status:** Implemented. Deploy and final live confirmation pending as the next step — want to see a full corpus pass complete with zero real timeouts before considering the whole PDF-extraction chain closed.
+
