@@ -11,7 +11,6 @@ import {
   ListObjectsV2Command,
   PutObjectCommand,
 } from "@aws-sdk/client-s3";
-import { PDFParse } from "pdf-parse";
 import type { RAGSource } from "@/app/lib/rag-types";
 
 const DEFAULT_REGION = "us-east-2";
@@ -156,6 +155,7 @@ function cleanText(text: string): string {
 async function extractText(buffer: Buffer, key: string): Promise<string> {
   const ext = extensionForKey(key);
   if (ext === ".pdf") {
+    const { PDFParse } = await import("pdf-parse");
     const parser = new PDFParse({ data: new Uint8Array(buffer) });
     try {
       const parsed = await parser.getText();
