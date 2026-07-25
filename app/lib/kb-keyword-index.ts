@@ -166,9 +166,20 @@ function cleanText(text: string): string {
     .trim();
 }
 
-async function extractText(buffer: Buffer, key: string): Promise<string> {
+async function ensureDOMMatrixPolyfill(): Promise<void> {
+  if (globalThis.DOMMatrix) return;
+  const { default: DOMMatrixShim } = await import("@thednp/dommatrix");
+  // pdfjs-dist's own Node fallback only tries to source DOMMatrix from
+  // @napi-rs/canvas when `globalThis.DOMMatrix` isn't already set - so
+  // priming it ourselves first sidesteps that native binary entirely,
+  // regardless of whether it would have loaded in this environment.
+  globalThis.DOMMatrix = DOMMatrixShim as unknown as typeof DOMMatrix;
+}
+
+export async function extractText(buffer: Buffer, key: string): Promise<string> {
   const ext = extensionForKey(key);
   if (ext === ".pdf") {
+    await ensureDOMMatrixPolyfill();
     const { PDFParse } = await import("pdf-parse");
     const parser = new PDFParse({ data: new Uint8Array(buffer) });
     try {

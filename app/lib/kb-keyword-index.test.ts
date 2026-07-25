@@ -21,7 +21,41 @@ vi.mock("@aws-sdk/client-s3", () => ({
   }),
 }));
 
-import { reconcileKeywordIndex } from "./kb-keyword-index";
+import { reconcileKeywordIndex, extractText } from "./kb-keyword-index";
+import DOMMatrixShim from "@thednp/dommatrix";
+
+// Minimal single-page PDF with one text line - enough for pdfjs-dist to
+// parse without needing a real PDF fixture on disk.
+const MINIMAL_PDF = Buffer.from(
+  `%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 40 >>
+stream
+BT /F1 18 Tf 20 100 Td (hello world) Tj ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 6
+0000000000 65535 f
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+0
+%%EOF`,
+  "utf8",
+);
 
 const TENANT_ID = "test-tenant-checkpoint";
 const KB_ID = "test-kb-checkpoint";
@@ -138,5 +172,34 @@ describe("reconcileKeywordIndex checkpointing", () => {
       ([cmd]: any) => cmd.__type === "ListObjectsV2Command",
     ).length;
     expect(listCallsAfterRound2).toBe(1);
+  });
+});
+
+describe("extractText DOMMatrix polyfill", () => {
+  const originalDOMMatrix = (globalThis as any).DOMMatrix;
+
+  afterEach(() => {
+    if (originalDOMMatrix === undefined) {
+      delete (globalThis as any).DOMMatrix;
+    } else {
+      (globalThis as any).DOMMatrix = originalDOMMatrix;
+    }
+  });
+
+  it("installs a global DOMMatrix polyfill before parsing a PDF, when none is set", async () => {
+    delete (globalThis as any).DOMMatrix;
+
+    await extractText(MINIMAL_PDF, "doc.pdf");
+
+    expect((globalThis as any).DOMMatrix).toBe(DOMMatrixShim);
+  });
+
+  it("does not overwrite an already-present global DOMMatrix", async () => {
+    class ExistingDOMMatrix {}
+    (globalThis as any).DOMMatrix = ExistingDOMMatrix;
+
+    await extractText(MINIMAL_PDF, "doc.pdf");
+
+    expect((globalThis as any).DOMMatrix).toBe(ExistingDOMMatrix);
   });
 });
