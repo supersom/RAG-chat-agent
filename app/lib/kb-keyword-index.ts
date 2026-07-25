@@ -79,6 +79,20 @@ type KeywordIndexParams = {
   bucketName: string;
   credentials?: AwsCredentials;
   region?: string;
+  timeBudgetMs?: number;
+  now?: () => number;
+};
+
+type ReconcileRunState = {
+  listedObjectCount: number;
+  changedObjectCount: number;
+  unchangedObjectCount: number;
+  deletedObjectCount: number;
+  indexedObjectCount: number;
+  indexedChunkCount: number;
+  skippedObjectCount: number;
+  listingPartial: boolean;
+  errors: string[];
 };
 
 function awsCredentials(credentials?: AwsCredentials): { accessKeyId: string; secretAccessKey: string } {
@@ -213,8 +227,140 @@ function initDatabase(dbPath: string): Database.Database {
       body,
       tokenize = 'unicode61'
     );
+
+    CREATE TABLE IF NOT EXISTS reconcile_queue (
+      s3_key TEXT PRIMARY KEY,
+      etag TEXT,
+      size INTEGER,
+      last_modified TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS reconcile_run (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      listed_object_count INTEGER NOT NULL,
+      changed_object_count INTEGER NOT NULL,
+      unchanged_object_count INTEGER NOT NULL,
+      deleted_object_count INTEGER NOT NULL,
+      indexed_object_count INTEGER NOT NULL,
+      indexed_chunk_count INTEGER NOT NULL,
+      skipped_object_count INTEGER NOT NULL,
+      listing_partial INTEGER NOT NULL,
+      errors TEXT NOT NULL
+    );
   `);
   return db;
+}
+
+// Resume state for a reconcile run that had to checkpoint mid-way through
+// processing (time budget exceeded). Both tables live inside the same
+// .sqlite file that already gets round-tripped through S3, so checkpointing
+// is just "upload the file" - no separate sidecar state to keep in sync.
+
+function readReconcileRun(db: Database.Database): ReconcileRunState | null {
+  const row = db.prepare(`SELECT * FROM reconcile_run WHERE id = 1`).get() as
+    | {
+        listed_object_count: number;
+        changed_object_count: number;
+        unchanged_object_count: number;
+        deleted_object_count: number;
+        indexed_object_count: number;
+        indexed_chunk_count: number;
+        skipped_object_count: number;
+        listing_partial: number;
+        errors: string;
+      }
+    | undefined;
+  if (!row) return null;
+  return {
+    listedObjectCount: row.listed_object_count,
+    changedObjectCount: row.changed_object_count,
+    unchangedObjectCount: row.unchanged_object_count,
+    deletedObjectCount: row.deleted_object_count,
+    indexedObjectCount: row.indexed_object_count,
+    indexedChunkCount: row.indexed_chunk_count,
+    skippedObjectCount: row.skipped_object_count,
+    listingPartial: Boolean(row.listing_partial),
+    errors: JSON.parse(row.errors || "[]"),
+  };
+}
+
+function writeReconcileRun(db: Database.Database, run: ReconcileRunState) {
+  db.prepare(
+    `
+      INSERT INTO reconcile_run (
+        id, listed_object_count, changed_object_count, unchanged_object_count,
+        deleted_object_count, indexed_object_count, indexed_chunk_count,
+        skipped_object_count, listing_partial, errors
+      )
+      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        listed_object_count = excluded.listed_object_count,
+        changed_object_count = excluded.changed_object_count,
+        unchanged_object_count = excluded.unchanged_object_count,
+        deleted_object_count = excluded.deleted_object_count,
+        indexed_object_count = excluded.indexed_object_count,
+        indexed_chunk_count = excluded.indexed_chunk_count,
+        skipped_object_count = excluded.skipped_object_count,
+        listing_partial = excluded.listing_partial,
+        errors = excluded.errors
+    `,
+  ).run(
+    run.listedObjectCount,
+    run.changedObjectCount,
+    run.unchangedObjectCount,
+    run.deletedObjectCount,
+    run.indexedObjectCount,
+    run.indexedChunkCount,
+    run.skippedObjectCount,
+    run.listingPartial ? 1 : 0,
+    JSON.stringify(run.errors),
+  );
+}
+
+function clearReconcileRun(db: Database.Database) {
+  db.prepare(`DELETE FROM reconcile_run WHERE id = 1`).run();
+}
+
+function enqueueObjects(db: Database.Database, objects: S3InventoryObject[]) {
+  const insert = db.prepare(
+    `INSERT OR REPLACE INTO reconcile_queue (s3_key, etag, size, last_modified) VALUES (?, ?, ?, ?)`,
+  );
+  const insertMany = db.transaction((items: S3InventoryObject[]) => {
+    for (const item of items) {
+      insert.run(
+        item.key,
+        item.etag ?? null,
+        item.size ?? null,
+        item.lastModified?.toISOString() ?? null,
+      );
+    }
+  });
+  insertMany(objects);
+}
+
+function readQueue(db: Database.Database): S3InventoryObject[] {
+  const rows = db
+    .prepare(`SELECT s3_key, etag, size, last_modified FROM reconcile_queue`)
+    .all() as Array<{
+    s3_key: string;
+    etag: string | null;
+    size: number | null;
+    last_modified: string | null;
+  }>;
+  return rows.map((row) => ({
+    key: row.s3_key,
+    etag: row.etag ?? undefined,
+    size: row.size ?? undefined,
+    lastModified: row.last_modified ? new Date(row.last_modified) : undefined,
+  }));
+}
+
+function removeFromQueue(db: Database.Database, key: string) {
+  db.prepare(`DELETE FROM reconcile_queue WHERE s3_key = ?`).run(key);
+}
+
+function clearQueue(db: Database.Database) {
+  db.prepare(`DELETE FROM reconcile_queue`).run();
 }
 
 async function downloadExistingIndex({
@@ -405,28 +551,27 @@ function ftsMatchQuery(query: string): string | null {
   return tokens.map((token) => `"${token}"`).join(" OR ");
 }
 
+const DEFAULT_TIME_BUDGET_MS = 20_000;
+
 export async function reconcileKeywordIndex({
   tenantId,
   knowledgeBaseId,
   bucketName,
   credentials,
   region,
+  timeBudgetMs,
+  now = Date.now,
 }: KeywordIndexParams): Promise<KeywordIndexUpdateResult> {
   const { indexBucket, indexKey } = keywordIndexLocation(tenantId, knowledgeBaseId, bucketName);
   const client = s3Client(region, credentials);
   const dbPath = tempIndexPath(tenantId, knowledgeBaseId);
   await downloadExistingIndex({ client, indexBucket, indexKey, dbPath });
 
-  const { objects, partial } = await listSupportedObjects({ client, bucketName });
   const db = initDatabase(dbPath);
   const maxObjectBytes = Number(process.env.KEYWORD_INDEX_MAX_OBJECT_BYTES || 50 * 1024 * 1024);
-  const errors: string[] = [];
-  let indexedObjectCount = 0;
-  let indexedChunkCount = 0;
-  let skippedObjectCount = 0;
-  let unchangedObjectCount = 0;
-  let deletedObjectCount = 0;
-  let changedObjectCount = 0;
+  const budgetMs =
+    timeBudgetMs ?? Number(process.env.KEYWORD_INDEX_TIME_BUDGET_MS || DEFAULT_TIME_BUDGET_MS);
+  const deadline = now() + budgetMs;
 
   const replaceOne = db.transaction((params: S3InventoryObject & { chunks: string[] }) => {
     deleteObjectRows(db, { tenantId, knowledgeBaseId, bucketName, key: params.key });
@@ -447,53 +592,103 @@ export async function reconcileKeywordIndex({
     deleteObjectRows(db, { tenantId, knowledgeBaseId, bucketName, key });
   });
 
-  try {
-    const existing = existingDocuments(db, { tenantId, knowledgeBaseId, bucketName });
-    const s3Keys = new Set(objects.map((object) => object.key));
+  let run: ReconcileRunState;
+  let partial: boolean;
 
-    if (!partial) {
-      for (const key of Array.from(existing.keys())) {
-        if (!s3Keys.has(key)) {
-          deleteOne(key);
-          deletedObjectCount += 1;
+  try {
+    const resumed = readReconcileRun(db);
+
+    if (resumed) {
+      run = resumed;
+    } else {
+      // Fresh run: list the bucket once, decide what changed, and run the
+      // stale-object deletion sweep - all of this depends on having the full
+      // current listing, so none of it is repeated on a resumed invocation.
+      const { objects, partial: listingPartial } = await listSupportedObjects({ client, bucketName });
+      const existing = existingDocuments(db, { tenantId, knowledgeBaseId, bucketName });
+      const s3Keys = new Set(objects.map((object) => object.key));
+
+      let deletedObjectCount = 0;
+      if (!listingPartial) {
+        for (const key of Array.from(existing.keys())) {
+          if (!s3Keys.has(key)) {
+            deleteOne(key);
+            deletedObjectCount += 1;
+          }
         }
       }
-    }
 
-    for (const object of objects) {
-      const previous = existing.get(object.key);
-      if (!hasObjectChanged(object, previous)) {
-        unchangedObjectCount += 1;
-        continue;
+      const toEnqueue: S3InventoryObject[] = [];
+      let unchangedObjectCount = 0;
+      for (const object of objects) {
+        const previous = existing.get(object.key);
+        if (!hasObjectChanged(object, previous)) {
+          unchangedObjectCount += 1;
+          continue;
+        }
+        toEnqueue.push(object);
       }
 
-      changedObjectCount += 1;
+      clearQueue(db);
+      enqueueObjects(db, toEnqueue);
+
+      run = {
+        listedObjectCount: objects.length,
+        changedObjectCount: toEnqueue.length,
+        unchangedObjectCount,
+        deletedObjectCount,
+        indexedObjectCount: 0,
+        indexedChunkCount: 0,
+        skippedObjectCount: 0,
+        listingPartial,
+        errors: [],
+      };
+    }
+
+    const queued = readQueue(db);
+    let processedCount = 0;
+
+    for (const object of queued) {
+      if (now() >= deadline) break;
+
       const size = object.size ?? 0;
       if (size > maxObjectBytes) {
         deleteOne(object.key);
-        skippedObjectCount += 1;
-        continue;
-      }
-
-      try {
-        const downloaded = await client.send(
-          new GetObjectCommand({ Bucket: bucketName, Key: object.key }),
-        );
-        const buffer = await streamToBuffer(downloaded.Body);
-        const text = await extractText(buffer, object.key);
-        const chunks = chunkText(text);
-        if (chunks.length === 0) {
-          deleteOne(object.key);
-          skippedObjectCount += 1;
-          continue;
+        run.skippedObjectCount += 1;
+      } else {
+        try {
+          const downloaded = await client.send(
+            new GetObjectCommand({ Bucket: bucketName, Key: object.key }),
+          );
+          const buffer = await streamToBuffer(downloaded.Body);
+          const text = await extractText(buffer, object.key);
+          const chunks = chunkText(text);
+          if (chunks.length === 0) {
+            deleteOne(object.key);
+            run.skippedObjectCount += 1;
+          } else {
+            replaceOne({ ...object, chunks });
+            run.indexedObjectCount += 1;
+            run.indexedChunkCount += chunks.length;
+          }
+        } catch (err) {
+          run.errors.push(
+            `${object.key}: ${err instanceof Error ? err.message : String(err)}`.slice(0, 500),
+          );
         }
-
-        replaceOne({ ...object, chunks });
-        indexedObjectCount += 1;
-        indexedChunkCount += chunks.length;
-      } catch (err) {
-        errors.push(`${object.key}: ${err instanceof Error ? err.message : String(err)}`.slice(0, 500));
       }
+
+      removeFromQueue(db, object.key);
+      processedCount += 1;
+    }
+
+    const remaining = queued.length - processedCount;
+    partial = run.listingPartial || remaining > 0;
+
+    if (remaining > 0) {
+      writeReconcileRun(db, run);
+    } else {
+      clearReconcileRun(db);
     }
 
     db.pragma("optimize");
@@ -501,6 +696,8 @@ export async function reconcileKeywordIndex({
     db.close();
   }
 
+  // Checkpoint: upload progress whether this run finished or had to stop for
+  // the time budget, so a timed-out invocation never discards completed work.
   await client.send(
     new PutObjectCommand({
       Bucket: indexBucket,
@@ -513,17 +710,17 @@ export async function reconcileKeywordIndex({
   return {
     indexBucket,
     indexKey,
-    mode: objects.length === 0 ? "skipped" : "reconcile",
-    listedObjectCount: objects.length,
-    changedObjectCount,
-    unchangedObjectCount,
-    deletedObjectCount,
-    indexedObjectCount,
-    indexedChunkCount,
-    skippedObjectCount,
-    errorCount: errors.length,
+    mode: run.listedObjectCount === 0 ? "skipped" : "reconcile",
+    listedObjectCount: run.listedObjectCount,
+    changedObjectCount: run.changedObjectCount,
+    unchangedObjectCount: run.unchangedObjectCount,
+    deletedObjectCount: run.deletedObjectCount,
+    indexedObjectCount: run.indexedObjectCount,
+    indexedChunkCount: run.indexedChunkCount,
+    skippedObjectCount: run.skippedObjectCount,
+    errorCount: run.errors.length,
     partial,
-    errors,
+    errors: run.errors,
   };
 }
 

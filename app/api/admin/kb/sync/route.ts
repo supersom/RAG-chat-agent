@@ -9,7 +9,11 @@ import {
 } from "@/app/lib/bedrock-kb";
 import { reconcileKeywordIndex } from "@/app/lib/kb-keyword-index";
 
-const syncRequestSchema = z.object({}).optional();
+const syncRequestSchema = z
+  .object({
+    resumeKeywordIndexOnly: z.boolean().optional(),
+  })
+  .optional();
 
 async function parseSyncRequest(req: Request) {
   try {
@@ -33,6 +37,7 @@ export async function POST(req: Request) {
   if (!parsed.success) {
     return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
   }
+  const resumeKeywordIndexOnly = parsed.data?.resumeKeywordIndexOnly === true;
 
   const tenant = await getTenant(session.user.tenantId);
   if (!tenant) {
@@ -47,10 +52,12 @@ export async function POST(req: Request) {
     );
   }
 
-  const jobId = await startKbIngestion(
-    tenant.knowledgeBaseId,
-    dataSource.dataSourceId,
-  );
+  // A keyword-index-only resume continues a checkpointed reconcile that
+  // already hit the route's time budget; it must not kick off another
+  // Bedrock ingestion job on top of the one the initial sync started.
+  const jobId = resumeKeywordIndexOnly
+    ? null
+    : await startKbIngestion(tenant.knowledgeBaseId, dataSource.dataSourceId);
 
   let keywordIndex = null;
   let keywordIndexError = null;

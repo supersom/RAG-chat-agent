@@ -54,6 +54,7 @@ export default function KnowledgeBaseManager() {
   const [keywordIndex, setKeywordIndex] = useState<KeywordIndexStatus | null>(null);
   const [keywordIndexError, setKeywordIndexError] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isKeywordIndexSyncing, setIsKeywordIndexSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
 
 
@@ -159,32 +160,56 @@ export default function KnowledgeBaseManager() {
     }
   }
 
+  // The keyword-index reconcile is time-budgeted server-side and reports
+  // `partial: true` when it had to checkpoint instead of finishing. Keep
+  // resuming it (without restarting the Bedrock ingestion job) until it
+  // reports a full pass, so a large knowledge base's first sync completes
+  // as several small requests instead of timing out as one big one.
+  async function runKeywordIndexSync(resumeOnly: boolean) {
+    setIsKeywordIndexSyncing(true);
+    try {
+      const res = await fetch("/api/admin/kb/sync", {
+        method: "POST",
+        headers: resumeOnly ? { "Content-Type": "application/json" } : undefined,
+        body: resumeOnly ? JSON.stringify({ resumeKeywordIndexOnly: true }) : undefined,
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        setSyncError(
+          typeof data?.error === "string" ? data.error : "Failed to start sync.",
+        );
+        return;
+      }
+
+      const {
+        jobId: newJobId,
+        keywordIndex: newKeywordIndex,
+        keywordIndexError: newKeywordIndexError,
+      } = await res.json();
+      setKeywordIndex(newKeywordIndex ?? null);
+      setKeywordIndexError(newKeywordIndexError ?? null);
+
+      if (!resumeOnly) {
+        setJobId(newJobId);
+        pollIngestion(newJobId);
+      }
+
+      if (newKeywordIndex?.partial && newKeywordIndex.mode === "reconcile" && !newKeywordIndexError) {
+        await runKeywordIndexSync(true);
+      }
+    } finally {
+      setIsKeywordIndexSyncing(false);
+    }
+  }
+
   async function handleSync() {
     setSyncError(null);
     setIngestion(null);
     setKeywordIndex(null);
     setKeywordIndexError(null);
     setIsSyncing(true);
-
-    const res = await fetch("/api/admin/kb/sync", { method: "POST" });
-    if (!res.ok) {
-      const data = await res.json().catch(() => null);
-      setSyncError(
-        typeof data?.error === "string" ? data.error : "Failed to start sync.",
-      );
-      setIsSyncing(false);
-      return;
-    }
-
-    const {
-      jobId: newJobId,
-      keywordIndex: newKeywordIndex,
-      keywordIndexError: newKeywordIndexError,
-    } = await res.json();
-    setJobId(newJobId);
-    setKeywordIndex(newKeywordIndex ?? null);
-    setKeywordIndexError(newKeywordIndexError ?? null);
-    pollIngestion(newJobId);
+    await runKeywordIndexSync(false);
   }
 
   return (
@@ -251,8 +276,12 @@ export default function KnowledgeBaseManager() {
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
-          <Button onClick={handleSync} disabled={isSyncing} className="w-fit">
-            {isSyncing ? "Syncing..." : "Sync Knowledge Base"}
+          <Button
+            onClick={handleSync}
+            disabled={isSyncing || isKeywordIndexSyncing}
+            className="w-fit"
+          >
+            {isSyncing || isKeywordIndexSyncing ? "Syncing..." : "Sync Knowledge Base"}
           </Button>
           {syncError && <p className="text-sm text-destructive">{syncError}</p>}
           {keywordIndex && (
