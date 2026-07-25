@@ -187,3 +187,11 @@ While drafting the plan's deployment task, I quoted the live output of `aws ampl
 **Decision:** Render Assistant Thinking and Knowledge Base history chronologically by reversing the newest-first activity query slice and appending live updates, then scroll those panels to the bottom when content changes. Keep Activity Logs newest-first, but scroll them to the top so the latest tenant-scoped log records stay visible.
 
 **Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck`, `npm run lint`, and `npm test`. Not pushed; no Amplify deploy triggered.
+
+## 2026-07-24 — Activity log metadata details
+
+**Context:** Activity Logs showed high-level lifecycle events, but not enough of the operational context needed to diagnose tenant behavior from the UI: which LLM config was resolved, which provider/model was used, which Bedrock guardrail was checked, and which knowledge base was queried.
+
+**Decision:** Add safe structured metadata helpers for LLM config, guardrails, and RAG retrieval. `/api/chat` now records provider/model/requested model/config source/allowed models, input/output guardrail source/id/version/region/checked text type/duration/block status, and knowledge-base id/region/requested result count/source counts. The Activity Logs sidebar now renders persisted metadata under each log line as compact key/value details. API keys, raw prompts, raw assistant responses, and retrieved snippets are still excluded from app logs.
+
+**Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck`, `npm run lint`, and `npm test`. Not pushed; no Amplify deploy triggered.

@@ -7,7 +7,7 @@ import { applyGuardrail, GuardrailResult } from "@/app/lib/guardrails";
 import { resolveLlmConfig } from "@/app/lib/llm-config";
 import { auth } from "@/auth";
 import { putAppLogActivity, putChatTurnActivity } from "@/app/lib/db/activity";
-import { ActivityLlmProvider } from "@/app/lib/db/schema";
+import { ActivityLlmProvider, Tenant } from "@/app/lib/db/schema";
 
 type ChatMessage = {
   role: "user" | "assistant" | "system";
@@ -48,6 +48,82 @@ function sanitizeActivityMetadata(
 
 function durationMs(start: number): number {
   return Math.round(performance.now() - start);
+}
+
+function resolveLlmConfigSource({
+  tenantDefaults,
+  clientApiKey,
+  resolvedProvider,
+}: {
+  tenantDefaults: Tenant["llmProviderDefaults"];
+  clientApiKey?: string;
+  resolvedProvider: ActivityLlmProvider;
+}): string {
+  if (tenantDefaults?.apiKeyCiphertext) return "tenant";
+  if (clientApiKey && resolvedProvider === "unknown") return "client";
+  return "server";
+}
+
+function llmLogMetadata({
+  tenantDefaults,
+  clientApiKey,
+  provider,
+  model,
+  requestedModel,
+  allowedModels,
+}: {
+  tenantDefaults: Tenant["llmProviderDefaults"];
+  clientApiKey?: string;
+  provider: ActivityLlmProvider;
+  model: string;
+  requestedModel?: string;
+  allowedModels: string[];
+}): Record<string, unknown> {
+  return {
+    provider,
+    model,
+    requestedModel: requestedModel || null,
+    usedRequestedModel: Boolean(requestedModel && requestedModel === model),
+    allowedModelCount: allowedModels.length,
+    allowedModels: allowedModels.join(", "),
+    configSource: resolveLlmConfigSource({
+      tenantDefaults,
+      clientApiKey,
+      resolvedProvider: provider,
+    }),
+    tenantDefaultProvider: tenantDefaults?.provider || null,
+    tenantDefaultModel: tenantDefaults?.model || null,
+    tenantAllowedModelCount: tenantDefaults?.allowedModels?.length ?? 0,
+    tenantHasApiKey: Boolean(tenantDefaults?.apiKeyCiphertext),
+    clientApiKeyProvided: Boolean(clientApiKey),
+  };
+}
+
+function guardrailLogMetadata(
+  tenant: Pick<Tenant, "guardrailId" | "guardrailVersion" | "awsRegion">,
+  source: "INPUT" | "OUTPUT",
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    guardrailSource: source,
+    guardrailId: tenant.guardrailId || null,
+    guardrailVersion: tenant.guardrailVersion || null,
+    guardrailConfigured: Boolean(tenant.guardrailId),
+    guardrailRegion: tenant.awsRegion || process.env.AWS_REGION || "us-east-1",
+    ...extra,
+  };
+}
+
+function ragLogMetadata(
+  tenant: Pick<Tenant, "knowledgeBaseId" | "awsRegion">,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    knowledgeBaseId: tenant.knowledgeBaseId || null,
+    knowledgeBaseRegion:
+      tenant.awsRegion || process.env.AWS_REGION || process.env.BAWS_REGION || "us-east-2",
+    ...extra,
+  };
 }
 
 async function persistChatActivity({
@@ -359,7 +435,14 @@ export async function POST(req: Request) {
       level: "error",
       route: "/api/chat",
       message: "Failed to resolve LLM provider configuration",
-      metadata: { error: sanitizeActivityText(err, 1000) },
+      metadata: {
+        tenantDefaultProvider: tenant.llmProviderDefaults?.provider || null,
+        tenantDefaultModel: tenant.llmProviderDefaults?.model || null,
+        tenantHasApiKey: Boolean(tenant.llmProviderDefaults?.apiKeyCiphertext),
+        clientApiKeyProvided: Boolean(clientApiKey),
+        requestedModel: model || null,
+        error: sanitizeActivityText(err, 1000),
+      },
     });
     return Response.json(
       { error: "Failed to resolve LLM provider configuration" },
@@ -372,6 +455,13 @@ export async function POST(req: Request) {
       level: "error",
       route: "/api/chat",
       message: "No LLM provider configured for this tenant",
+      metadata: {
+        tenantDefaultProvider: tenant.llmProviderDefaults?.provider || null,
+        tenantDefaultModel: tenant.llmProviderDefaults?.model || null,
+        tenantHasApiKey: Boolean(tenant.llmProviderDefaults?.apiKeyCiphertext),
+        clientApiKeyProvided: Boolean(clientApiKey),
+        requestedModel: model || null,
+      },
     });
     return Response.json(
       { error: "No LLM provider configured for this tenant" },
@@ -407,13 +497,14 @@ export async function POST(req: Request) {
     level: "info",
     route: "/api/chat",
     message: "LLM configuration resolved",
-    metadata: {
+    metadata: llmLogMetadata({
+      tenantDefaults: tenant.llmProviderDefaults,
+      clientApiKey,
       provider: llmConfig.provider,
       model: resolvedModel,
-      requestedModel: model || null,
-      usedRequestedModel: Boolean(model && model === resolvedModel),
-      allowedModelCount: llmConfig.allowedModels.length,
-    },
+      requestedModel: model,
+      allowedModels: llmConfig.allowedModels,
+    }),
   });
 
   // Prepare debug data
@@ -434,10 +525,10 @@ export async function POST(req: Request) {
     level: "debug",
     route: "/api/chat",
     message: "Input guardrail check started",
-    metadata: {
-      guardrailConfigured: Boolean(tenant.guardrailId),
-      guardrailVersion: tenant.guardrailVersion || null,
-    },
+    metadata: guardrailLogMetadata(tenant, "INPUT", {
+      checkedText: "latest user message",
+      checkedTextLength: latestMessage.length,
+    }),
   });
   try {
     inputGuardrail = await applyGuardrail({
@@ -446,6 +537,7 @@ export async function POST(req: Request) {
       guardrailId: tenant.guardrailId,
       guardrailVersion: tenant.guardrailVersion,
       credentials: tenant.awsCredentials,
+      region: tenant.awsRegion,
     });
   } catch (err) {
     console.error("Guardrail (input) call failed, failing closed:", err);
@@ -462,7 +554,12 @@ export async function POST(req: Request) {
       level: "error",
       route: "/api/chat",
       message: "Input guardrail call failed",
-      metadata: { error: sanitizeActivityText(err, 1000) },
+      metadata: guardrailLogMetadata(tenant, "INPUT", {
+        checkedText: "latest user message",
+        checkedTextLength: latestMessage.length,
+        durationMs: durationMs(inputGuardrailStart),
+        error: sanitizeActivityText(err, 1000),
+      }),
     });
     await persistChatActivity({
       actor,
@@ -488,10 +585,12 @@ export async function POST(req: Request) {
     message: inputGuardrail.blocked
       ? "Input guardrail blocked request"
       : "Input guardrail check completed",
-    metadata: {
+    metadata: guardrailLogMetadata(tenant, "INPUT", {
+      checkedText: "latest user message",
+      checkedTextLength: latestMessage.length,
       blocked: inputGuardrail.blocked,
       durationMs: durationMs(inputGuardrailStart),
-    },
+    }),
   });
   if (inputGuardrail.blocked) {
     const blockedResponse = {
@@ -522,7 +621,20 @@ export async function POST(req: Request) {
       level: "warn",
       route: "/api/chat",
       message: "Chat turn blocked by input guardrail",
-      metadata: { provider: llmConfig.provider, model: resolvedModel },
+      metadata: {
+        ...guardrailLogMetadata(tenant, "INPUT", {
+          checkedText: "latest user message",
+          checkedTextLength: latestMessage.length,
+        }),
+        ...llmLogMetadata({
+          tenantDefaults: tenant.llmProviderDefaults,
+          clientApiKey,
+          provider: llmConfig.provider,
+          model: resolvedModel,
+          requestedModel: model,
+          allowedModels: llmConfig.allowedModels,
+        }),
+      },
     });
     return Response.json(blockedResponse, { status: 200 });
   }
@@ -539,10 +651,10 @@ export async function POST(req: Request) {
     level: "debug",
     route: "/api/chat",
     message: "RAG retrieval started",
-    metadata: {
-      knowledgeBaseId: tenant.knowledgeBaseId || null,
+    metadata: ragLogMetadata(tenant, {
       requestedResults: 3,
-    },
+      queryLength: latestMessage.length,
+    }),
   });
   try {
     console.log("🔍 Initiating RAG retrieval for query:", latestMessage);
@@ -552,6 +664,7 @@ export async function POST(req: Request) {
       tenant.knowledgeBaseId,
       3,
       tenant.awsCredentials,
+      tenant.awsRegion,
     );
     retrievedContext = result.context;
     isRagWorking = result.isRagWorking;
@@ -568,7 +681,8 @@ export async function POST(req: Request) {
       message: result.isRagWorking
         ? "RAG retrieval completed"
         : "RAG retrieval returned no usable context",
-      metadata: {
+      metadata: ragLogMetadata(tenant, {
+        requestedResults: 3,
         contextUsed: result.isRagWorking,
         sourceCount: ragSources.length,
         durationMs: durationMs(ragStart),
@@ -576,7 +690,7 @@ export async function POST(req: Request) {
           ragSources
             .map((source) => `${source.fileName}:${source.score.toFixed(3)}`)
             .join(", ") || null,
-      },
+      }),
     });
 
     measureTime("RAG Complete");
@@ -593,7 +707,11 @@ export async function POST(req: Request) {
       level: "error",
       route: "/api/chat",
       message: "RAG retrieval failed",
-      metadata: { error: sanitizeActivityText(error, 1000) },
+      metadata: ragLogMetadata(tenant, {
+        requestedResults: 3,
+        durationMs: durationMs(ragStart),
+        error: sanitizeActivityText(error, 1000),
+      }),
     });
     retrievedContext = "";
     isRagWorking = false;
@@ -704,10 +822,17 @@ export async function POST(req: Request) {
       route: "/api/chat",
       message: "LLM generation started",
       metadata: {
-        provider: llmConfig.provider,
-        model: resolvedModel,
+        ...llmLogMetadata({
+          tenantDefaults: tenant.llmProviderDefaults,
+          clientApiKey,
+          provider: llmConfig.provider,
+          model: resolvedModel,
+          requestedModel: model,
+          allowedModels: llmConfig.allowedModels,
+        }),
         messageCount: messages.length + 1,
         contextUsed: isRagWorking,
+        knowledgeBaseId: tenant.knowledgeBaseId || null,
         sourceCount: ragSources.length,
       },
     });
@@ -732,8 +857,14 @@ export async function POST(req: Request) {
       route: "/api/chat",
       message: "LLM generation completed",
       metadata: {
-        provider: llmConfig.provider,
-        model: resolvedModel,
+        ...llmLogMetadata({
+          tenantDefaults: tenant.llmProviderDefaults,
+          clientApiKey,
+          provider: llmConfig.provider,
+          model: resolvedModel,
+          requestedModel: model,
+          allowedModels: llmConfig.allowedModels,
+        }),
         durationMs: durationMs(generationStart),
       },
     });
@@ -772,10 +903,10 @@ export async function POST(req: Request) {
       level: "debug",
       route: "/api/chat",
       message: "Output guardrail check started",
-      metadata: {
-        guardrailConfigured: Boolean(tenant.guardrailId),
-        guardrailVersion: tenant.guardrailVersion || null,
-      },
+      metadata: guardrailLogMetadata(tenant, "OUTPUT", {
+        checkedText: "assistant response",
+        checkedTextLength: validatedResponse.response.length,
+      }),
     });
     try {
       const outputGuardrail = await applyGuardrail({
@@ -784,6 +915,7 @@ export async function POST(req: Request) {
         guardrailId: tenant.guardrailId,
         guardrailVersion: tenant.guardrailVersion,
         credentials: tenant.awsCredentials,
+        region: tenant.awsRegion,
       });
       if (outputGuardrail.blocked) {
         outputGuardrailBlocked = true;
@@ -796,7 +928,12 @@ export async function POST(req: Request) {
         level: "error",
         route: "/api/chat",
         message: "Output guardrail call failed",
-        metadata: { error: sanitizeActivityText(err, 1000) },
+        metadata: guardrailLogMetadata(tenant, "OUTPUT", {
+          checkedText: "assistant response",
+          checkedTextLength: validatedResponse.response.length,
+          durationMs: durationMs(outputGuardrailStart),
+          error: sanitizeActivityText(err, 1000),
+        }),
       });
     }
     await persistAppLogActivity({
@@ -806,10 +943,12 @@ export async function POST(req: Request) {
       message: outputGuardrailBlocked
         ? "Output guardrail blocked response"
         : "Output guardrail check completed",
-      metadata: {
+      metadata: guardrailLogMetadata(tenant, "OUTPUT", {
+        checkedText: "assistant response",
+        checkedTextLength: validatedResponse.response.length,
         blocked: outputGuardrailBlocked,
         durationMs: durationMs(outputGuardrailStart),
-      },
+      }),
     });
 
     const responseWithId = {
@@ -846,10 +985,19 @@ export async function POST(req: Request) {
       route: "/api/chat",
       message: "Chat turn completed",
       metadata: {
-        provider: llmConfig.provider,
-        model: resolvedModel,
+        ...llmLogMetadata({
+          tenantDefaults: tenant.llmProviderDefaults,
+          clientApiKey,
+          provider: llmConfig.provider,
+          model: resolvedModel,
+          requestedModel: model,
+          allowedModels: llmConfig.allowedModels,
+        }),
+        knowledgeBaseId: tenant.knowledgeBaseId || null,
         contextUsed: responseWithId.debug.context_used,
         sourceCount: ragSources.length,
+        inputGuardrailId: tenant.guardrailId || null,
+        inputGuardrailVersion: tenant.guardrailVersion || null,
         outputGuardrailBlocked,
         redirectToAgent: Boolean(
           responseWithId.redirect_to_agent?.should_redirect,
@@ -895,7 +1043,19 @@ export async function POST(req: Request) {
       level: "error",
       route: "/api/chat",
       message: "Message generation failed",
-      metadata: { error: sanitizeActivityText(error, 1000) },
+      metadata: {
+        ...llmLogMetadata({
+          tenantDefaults: tenant.llmProviderDefaults,
+          clientApiKey,
+          provider: llmConfig.provider,
+          model: resolvedModel,
+          requestedModel: model,
+          allowedModels: llmConfig.allowedModels,
+        }),
+        knowledgeBaseId: tenant.knowledgeBaseId || null,
+        sourceCount: ragSources.length,
+        error: sanitizeActivityText(error, 1000),
+      },
     });
     await persistChatActivity({
       actor,

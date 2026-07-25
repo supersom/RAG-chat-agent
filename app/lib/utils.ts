@@ -22,13 +22,14 @@ export async function retrieveContext(
   knowledgeBaseId: string,
   n: number = 3,
   credentials?: { accessKeyId?: string; secretAccessKey?: string },
+  region?: string,
 ): Promise<{
   context: string;
   isRagWorking: boolean;
   ragSources: RAGSource[];
 }> {
   const bedrockClient = new BedrockAgentRuntimeClient({
-    region: process.env.AWS_REGION || process.env.BAWS_REGION || "us-east-2",
+    region: region || process.env.AWS_REGION || process.env.BAWS_REGION || "us-east-2",
     credentials: {
       accessKeyId: (credentials?.accessKeyId || process.env.BAWS_ACCESS_KEY_ID)!,
       secretAccessKey: (credentials?.secretAccessKey || process.env.BAWS_SECRET_ACCESS_KEY)!,

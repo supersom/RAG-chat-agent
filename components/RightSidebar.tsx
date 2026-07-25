@@ -32,12 +32,15 @@ interface SidebarEvent {
   debug?: DebugInfo;
 }
 
+type LogMetadata = Record<string, string | number | boolean | null>;
+
 interface LogEvent {
   id: string;
   timestamp?: number;
   message?: string;
   userLabel?: string;
   level?: "debug" | "info" | "warn" | "error";
+  metadata?: LogMetadata;
 }
 
 type ActivityRecord = {
@@ -52,6 +55,7 @@ type ActivityRecord = {
     level: "debug" | "info" | "warn" | "error";
     message: string;
     route?: string;
+    metadata?: LogMetadata;
   };
 };
 
@@ -97,7 +101,22 @@ function logEventsFromActivities(activities: ActivityRecord[]): LogEvent[] {
       level: activity.appLog!.level,
       userLabel: userLabel(activity),
       message: `${activity.appLog!.route || "app"}: ${activity.appLog!.message}`,
+      metadata: activity.appLog!.metadata,
     }));
+}
+
+function formatMetadataValue(value: string | number | boolean | null): string {
+  if (value === null) return "null";
+  if (typeof value === "boolean") return value ? "true" : "false";
+  return String(value);
+}
+
+function formatLogMetadata(metadata?: LogMetadata): string[] {
+  if (!metadata) return [];
+
+  return Object.entries(metadata)
+    .filter(([, value]) => value !== "" && value !== null)
+    .map(([key, value]) => `${key}=${formatMetadataValue(value)}`);
 }
 
 const truncateSnippet = (text: string): string => {
@@ -410,26 +429,37 @@ const RightSidebar: React.FC = () => {
                   No persisted activity logs yet. Polling every 5s.
                 </div>
               )}
-              {logs.map((event) => (
-                <div
-                  key={event.id}
-                  className="font-mono text-xs leading-relaxed"
-                >
-                  <span className="text-muted-foreground mr-2">
-                    {event.timestamp
-                      ? new Date(event.timestamp).toLocaleTimeString()
-                      : ""}
-                  </span>
-                  {event.userLabel && (
-                    <span className="text-muted-foreground mr-2">
-                      {event.userLabel}
-                    </span>
-                  )}
-                  <span className={getLogColor(event.message ?? "")}>
-                    {event.message ?? ""}
-                  </span>
-                </div>
-              ))}
+              {logs.map((event) => {
+                const metadata = formatLogMetadata(event.metadata);
+
+                return (
+                  <div
+                    key={event.id}
+                    className="font-mono text-xs leading-relaxed"
+                  >
+                    <div>
+                      <span className="text-muted-foreground mr-2">
+                        {event.timestamp
+                          ? new Date(event.timestamp).toLocaleTimeString()
+                          : ""}
+                      </span>
+                      {event.userLabel && (
+                        <span className="text-muted-foreground mr-2">
+                          {event.userLabel}
+                        </span>
+                      )}
+                      <span className={getLogColor(event.message ?? "")}>
+                        {event.message ?? ""}
+                      </span>
+                    </div>
+                    {metadata.length > 0 && (
+                      <div className="ml-16 break-words text-[11px] text-muted-foreground">
+                        {metadata.join(" | ")}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
               {logsLoading && logs.length === 0 && (
                 <div className="text-xs text-muted-foreground">Loading…</div>
               )}
