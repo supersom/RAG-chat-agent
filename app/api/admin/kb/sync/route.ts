@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 import { auth } from "@/auth";
 import { getTenant } from "@/app/lib/db/tenants";
 import {
@@ -6,14 +7,33 @@ import {
   startKbIngestion,
   getKbIngestionStatus,
 } from "@/app/lib/bedrock-kb";
+import { updateKeywordIndex } from "@/app/lib/kb-keyword-index";
 
-export async function POST() {
+const syncRequestSchema = z.object({
+  uploadedKeys: z.array(z.string().min(1).max(1024)).max(500).optional(),
+});
+
+async function parseSyncRequest(req: Request) {
+  try {
+    const bodyText = await req.text();
+    return syncRequestSchema.safeParse(bodyText ? JSON.parse(bodyText) : {});
+  } catch {
+    return syncRequestSchema.safeParse(null);
+  }
+}
+
+export async function POST(req: Request) {
   const session = await auth();
   if (!session) {
     return Response.json({ error: "Authentication required" }, { status: 401 });
   }
   if (session.user.role !== "admin") {
     return Response.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  const parsed = await parseSyncRequest(req);
+  if (!parsed.success) {
+    return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
   }
 
   const tenant = await getTenant(session.user.tenantId);
@@ -34,7 +54,22 @@ export async function POST() {
     dataSource.dataSourceId,
   );
 
-  return NextResponse.json({ jobId });
+  let keywordIndex = null;
+  let keywordIndexError = null;
+  try {
+    keywordIndex = await updateKeywordIndex({
+      tenantId: tenant.tenantId,
+      knowledgeBaseId: tenant.knowledgeBaseId,
+      bucketName: dataSource.bucketName,
+      objectKeys: parsed.data.uploadedKeys ?? [],
+      region: tenant.awsRegion,
+    });
+  } catch (err) {
+    console.error("Keyword index update failed:", err);
+    keywordIndexError = err instanceof Error ? err.message : "Keyword index update failed";
+  }
+
+  return NextResponse.json({ jobId, keywordIndex, keywordIndexError });
 }
 
 export async function GET(req: Request) {

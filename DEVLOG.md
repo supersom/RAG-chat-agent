@@ -203,3 +203,11 @@ While drafting the plan's deployment task, I quoted the live output of `aws ampl
 **Decision:** Tried `overrideSearchType: "HYBRID"` in the Bedrock `RetrieveCommand`, but the deployed KB returned `HYBRID search type is not supported for search operation on index SLXQFWWXPR`. Reverted the request override and the `requestedSearchType=HYBRID` activity metadata. This KB needs a separate keyword/BM25 index if the backing vector store cannot change.
 
 **Status:** Reverted locally on `worktree-tenant-llm-config` and verified with `npm run typecheck`, `npm run lint`, and `npm test`. Not pushed; no Amplify deploy triggered.
+
+## 2026-07-24 — SQLite FTS5 keyword index for KB uploads
+
+**Context:** Bedrock `overrideSearchType: "HYBRID"` is not supported by the current knowledge-base backing store, but exact-token queries still need BM25-style keyword recall alongside vector retrieval. The app already has an admin upload flow followed by a Bedrock sync action.
+
+**Decision:** Add a server-side SQLite FTS5 keyword index using `better-sqlite3`, with text/PDF extraction via `pdf-parse`. `/admin/knowledge-base` now sends the uploaded S3 keys to `/api/admin/kb/sync`; that route starts the Bedrock ingestion job and incrementally upserts those same objects into a per-tenant/per-KB SQLite index, then stores the `.sqlite` file in S3 under `.customer-support-agent/keyword-indexes/<tenant>/<kb>.sqlite` by default. Chat RAG now searches Bedrock vector results plus the S3-stored FTS index, merges results with reciprocal-rank fusion, and records vector/keyword source counts in activity metadata.
+
+**Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck`, `npm run lint`, `npm test`, and `npm run build`. Not pushed; no Amplify deploy triggered.

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { retrieveContext, RAGSource } from "@/app/lib/utils";
+import { retrieveContext, type RAGSource } from "@/app/lib/rag";
 import crypto from "crypto";
 import customerSupportCategories from "@/app/lib/customer_support_categories.json";
 import { resolveTenantContext, isTenantResolutionError } from "@/app/lib/tenant";
@@ -665,6 +665,7 @@ export async function POST(req: Request) {
       3,
       tenant.awsCredentials,
       tenant.awsRegion,
+      tenant.tenantId,
     );
     retrievedContext = result.context;
     isRagWorking = result.isRagWorking;
@@ -688,8 +689,10 @@ export async function POST(req: Request) {
         durationMs: durationMs(ragStart),
         sourceFiles:
           ragSources
-            .map((source) => `${source.fileName}:${source.score.toFixed(3)}`)
+            .map((source) => `${source.fileName}:${source.score.toFixed(3)}:${source.retrievalType || "vector"}`)
             .join(", ") || null,
+        vectorSourceCount: ragSources.filter((source) => source.retrievalType !== "keyword").length,
+        keywordSourceCount: ragSources.filter((source) => source.retrievalType === "keyword").length,
       }),
     });
 

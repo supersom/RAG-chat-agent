@@ -20,6 +20,15 @@ type IngestionStatus = {
   };
 };
 
+type KeywordIndexStatus = {
+  mode: "incremental" | "skipped";
+  indexedObjectCount: number;
+  indexedChunkCount: number;
+  skippedObjectCount: number;
+  errorCount: number;
+  errors: string[];
+};
+
 const TERMINAL_STATUSES = new Set(["COMPLETE", "FAILED"]);
 const POLL_INTERVAL_MS = 5000;
 
@@ -37,6 +46,8 @@ export default function KnowledgeBaseManager() {
 
   const [jobId, setJobId] = useState<string | null>(null);
   const [ingestion, setIngestion] = useState<IngestionStatus | null>(null);
+  const [keywordIndex, setKeywordIndex] = useState<KeywordIndexStatus | null>(null);
+  const [keywordIndexError, setKeywordIndexError] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
 
@@ -146,9 +157,15 @@ export default function KnowledgeBaseManager() {
   async function handleSync() {
     setSyncError(null);
     setIngestion(null);
+    setKeywordIndex(null);
+    setKeywordIndexError(null);
     setIsSyncing(true);
 
-    const res = await fetch("/api/admin/kb/sync", { method: "POST" });
+    const res = await fetch("/api/admin/kb/sync", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ uploadedKeys }),
+    });
     if (!res.ok) {
       const data = await res.json().catch(() => null);
       setSyncError(
@@ -158,8 +175,14 @@ export default function KnowledgeBaseManager() {
       return;
     }
 
-    const { jobId: newJobId } = await res.json();
+    const {
+      jobId: newJobId,
+      keywordIndex: newKeywordIndex,
+      keywordIndexError: newKeywordIndexError,
+    } = await res.json();
     setJobId(newJobId);
+    setKeywordIndex(newKeywordIndex ?? null);
+    setKeywordIndexError(newKeywordIndexError ?? null);
     pollIngestion(newJobId);
   }
 
@@ -231,6 +254,31 @@ export default function KnowledgeBaseManager() {
             {isSyncing ? "Syncing..." : "Sync Knowledge Base"}
           </Button>
           {syncError && <p className="text-sm text-destructive">{syncError}</p>}
+          {keywordIndex && (
+            <div className="text-sm text-muted-foreground">
+              <p>
+                Keyword index: {keywordIndex.mode === "skipped" ? "no supported uploaded files" : "updated"}
+                {keywordIndex.mode === "incremental" &&
+                  ` (${keywordIndex.indexedObjectCount} files, ${keywordIndex.indexedChunkCount} chunks)`}
+                {keywordIndex.skippedObjectCount > 0 &&
+                  `, skipped ${keywordIndex.skippedObjectCount}`}
+                {keywordIndex.errorCount > 0 && `, ${keywordIndex.errorCount} errors`}
+                .
+              </p>
+              {keywordIndex.errors.length > 0 && (
+                <ul className="mt-2 max-h-24 list-disc overflow-y-auto pl-5 font-mono text-xs text-destructive">
+                  {keywordIndex.errors.map((error) => (
+                    <li key={error}>{error}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+          {keywordIndexError && (
+            <p className="text-sm text-destructive">
+              Keyword index update failed: {keywordIndexError}
+            </p>
+          )}
           {jobId && ingestion && (
             <div className="text-sm text-muted-foreground">
               <p>
