@@ -195,3 +195,11 @@ While drafting the plan's deployment task, I quoted the live output of `aws ampl
 **Decision:** Add safe structured metadata helpers for LLM config, guardrails, and RAG retrieval. `/api/chat` now records provider/model/requested model/config source/allowed models, input/output guardrail source/id/version/region/checked text type/duration/block status, and knowledge-base id/region/requested result count/source counts. The Activity Logs sidebar now renders persisted metadata under each log line as compact key/value details. API keys, raw prompts, raw assistant responses, and retrieved snippets are still excluded from app logs.
 
 **Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck`, `npm run lint`, and `npm test`. Not pushed; no Amplify deploy triggered.
+
+## 2026-07-24 — Request hybrid Bedrock KB retrieval
+
+**Context:** Exact-token queries such as error codes, tenant IDs, route names, and config keys are weak spots for pure semantic/vector retrieval because the important term is often a literal identifier rather than a concept.
+
+**Decision:** Request Bedrock Knowledge Bases hybrid retrieval by setting `overrideSearchType: "HYBRID"` in the `RetrieveCommand` vector search configuration. RAG activity metadata now also records `requestedSearchType=HYBRID` so admins can see the intended retrieval mode in Activity Logs. Bedrock may still fall back to semantic search if the configured vector store does not support hybrid search.
+
+**Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck`, `npm run lint`, and `npm test`. Not pushed; no Amplify deploy triggered.

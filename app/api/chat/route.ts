@@ -122,6 +122,7 @@ function ragLogMetadata(
     knowledgeBaseId: tenant.knowledgeBaseId || null,
     knowledgeBaseRegion:
       tenant.awsRegion || process.env.AWS_REGION || process.env.BAWS_REGION || "us-east-2",
+    requestedSearchType: "HYBRID",
     ...extra,
   };
 }
