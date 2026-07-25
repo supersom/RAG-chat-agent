@@ -7,11 +7,9 @@ import {
   startKbIngestion,
   getKbIngestionStatus,
 } from "@/app/lib/bedrock-kb";
-import { updateKeywordIndex } from "@/app/lib/kb-keyword-index";
+import { reconcileKeywordIndex } from "@/app/lib/kb-keyword-index";
 
-const syncRequestSchema = z.object({
-  uploadedKeys: z.array(z.string().min(1).max(1024)).max(500).optional(),
-});
+const syncRequestSchema = z.object({}).optional();
 
 async function parseSyncRequest(req: Request) {
   try {
@@ -57,11 +55,10 @@ export async function POST(req: Request) {
   let keywordIndex = null;
   let keywordIndexError = null;
   try {
-    keywordIndex = await updateKeywordIndex({
+    keywordIndex = await reconcileKeywordIndex({
       tenantId: tenant.tenantId,
       knowledgeBaseId: tenant.knowledgeBaseId,
       bucketName: dataSource.bucketName,
-      objectKeys: parsed.data.uploadedKeys ?? [],
       region: tenant.awsRegion,
     });
   } catch (err) {

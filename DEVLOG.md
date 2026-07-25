@@ -211,3 +211,11 @@ While drafting the plan's deployment task, I quoted the live output of `aws ampl
 **Decision:** Add a server-side SQLite FTS5 keyword index using `better-sqlite3`, with text/PDF extraction via `pdf-parse`. `/admin/knowledge-base` now sends the uploaded S3 keys to `/api/admin/kb/sync`; that route starts the Bedrock ingestion job and incrementally upserts those same objects into a per-tenant/per-KB SQLite index, then stores the `.sqlite` file in S3 under `.customer-support-agent/keyword-indexes/<tenant>/<kb>.sqlite` by default. Chat RAG now searches Bedrock vector results plus the S3-stored FTS index, merges results with reciprocal-rank fusion, and records vector/keyword source counts in activity metadata.
 
 **Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck`, `npm run lint`, `npm test`, and `npm run build`. Not pushed; no Amplify deploy triggered.
+
+## 2026-07-24 — Keyword index reconciles from S3 on KB sync
+
+**Context:** The first SQLite FTS5 implementation only indexed keys still present in the admin page's `uploadedKeys` state. That left Bedrock and SQLite out of sync after page refreshes, direct S3 uploads, external updates, or deletions.
+
+**Decision:** Change `/api/admin/kb/sync` to reconcile the keyword index from the tenant knowledge-base S3 data source every time sync runs. The reconcile path lists supported S3 objects, excludes the reserved keyword-index prefix, compares each object against SQLite `documents` metadata (`s3_key`, `etag`, `size`, `last_modified`), indexes new/changed files, skips unchanged files, and deletes SQLite rows for objects no longer present in S3 after a complete scan. Changed files that become oversized or text-empty now have stale FTS rows removed. The admin UI now reports listed, changed/new, unchanged, deleted, indexed, skipped, partial, and error counts.
+
+**Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck`, `npm run lint`, `npm test`, and `npm run build`. Not pushed; no Amplify deploy triggered.

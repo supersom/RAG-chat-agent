@@ -5,7 +5,12 @@ import os from "os";
 import path from "path";
 import crypto from "crypto";
 import Database from "better-sqlite3";
-import { S3Client, GetObjectCommand, HeadObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import {
+  S3Client,
+  GetObjectCommand,
+  ListObjectsV2Command,
+  PutObjectCommand,
+} from "@aws-sdk/client-s3";
 import { PDFParse } from "pdf-parse";
 import type { RAGSource } from "@/app/lib/rag-types";
 
@@ -29,14 +34,33 @@ type AwsCredentials = {
   secretAccessKey?: string;
 };
 
+type S3InventoryObject = {
+  key: string;
+  etag?: string;
+  size?: number;
+  lastModified?: Date;
+};
+
+type ExistingDocument = {
+  s3Key: string;
+  etag: string | null;
+  size: number | null;
+  lastModified: string | null;
+};
+
 export type KeywordIndexUpdateResult = {
   indexBucket: string;
   indexKey: string;
-  mode: "incremental" | "skipped";
+  mode: "reconcile" | "skipped";
+  listedObjectCount: number;
+  changedObjectCount: number;
+  unchangedObjectCount: number;
+  deletedObjectCount: number;
   indexedObjectCount: number;
   indexedChunkCount: number;
   skippedObjectCount: number;
   errorCount: number;
+  partial: boolean;
   errors: string[];
 };
 
@@ -54,7 +78,6 @@ type KeywordIndexParams = {
   tenantId: string;
   knowledgeBaseId: string;
   bucketName: string;
-  objectKeys: string[];
   credentials?: AwsCredentials;
   region?: string;
 };
@@ -73,14 +96,17 @@ function s3Client(region?: string, credentials?: AwsCredentials): S3Client {
   });
 }
 
+function keywordIndexPrefix(): string {
+  return (process.env.KEYWORD_INDEX_S3_PREFIX || DEFAULT_INDEX_PREFIX).replace(/\/+$/, "");
+}
+
 function keywordIndexLocation(tenantId: string, knowledgeBaseId: string, bucketName: string) {
   const indexBucket = process.env.KEYWORD_INDEX_S3_BUCKET || bucketName;
-  const prefix = (process.env.KEYWORD_INDEX_S3_PREFIX || DEFAULT_INDEX_PREFIX).replace(/\/+$/, "");
   const safeTenant = encodeURIComponent(tenantId);
   const safeKb = encodeURIComponent(knowledgeBaseId);
   return {
     indexBucket,
-    indexKey: `${prefix}/${safeTenant}/${safeKb}.sqlite`,
+    indexKey: `${keywordIndexPrefix()}/${safeTenant}/${safeKb}.sqlite`,
   };
 }
 
@@ -99,7 +125,7 @@ function extensionForKey(key: string): string {
 
 function isSupportedObject(key: string): boolean {
   if (!key || key.endsWith("/")) return false;
-  if (key.startsWith(`${process.env.KEYWORD_INDEX_S3_PREFIX || DEFAULT_INDEX_PREFIX}/`)) return false;
+  if (key.startsWith(`${keywordIndexPrefix()}/`)) return false;
   return SUPPORTED_EXTENSIONS.has(extensionForKey(key));
 }
 
@@ -217,6 +243,76 @@ async function downloadExistingIndex({
   }
 }
 
+async function listSupportedObjects({
+  client,
+  bucketName,
+}: {
+  client: S3Client;
+  bucketName: string;
+}): Promise<{ objects: S3InventoryObject[]; partial: boolean }> {
+  const maxObjects = Number(process.env.KEYWORD_INDEX_MAX_RECONCILE_OBJECTS || 0);
+  const objects: S3InventoryObject[] = [];
+  let continuationToken: string | undefined;
+  let partial = false;
+
+  do {
+    const page = await client.send(
+      new ListObjectsV2Command({
+        Bucket: bucketName,
+        ContinuationToken: continuationToken,
+      }),
+    );
+
+    for (const object of page.Contents ?? []) {
+      const key = object.Key;
+      if (!key || !isSupportedObject(key)) continue;
+      objects.push({
+        key,
+        etag: object.ETag,
+        size: object.Size,
+        lastModified: object.LastModified,
+      });
+
+      if (maxObjects > 0 && objects.length >= maxObjects) {
+        partial = true;
+        return { objects, partial };
+      }
+    }
+
+    continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
+  } while (continuationToken);
+
+  return { objects, partial };
+}
+
+function existingDocuments(
+  db: Database.Database,
+  params: { tenantId: string; knowledgeBaseId: string; bucketName: string },
+): Map<string, ExistingDocument> {
+  const rows = db.prepare(
+    `
+      SELECT
+        s3_key as s3Key,
+        etag,
+        size,
+        last_modified as lastModified
+      FROM documents
+      WHERE tenant_id = ? AND knowledge_base_id = ? AND bucket = ?
+    `,
+  ).all(params.tenantId, params.knowledgeBaseId, params.bucketName) as ExistingDocument[];
+
+  return new Map(rows.map((row) => [row.s3Key, row]));
+}
+
+function hasObjectChanged(object: S3InventoryObject, existing?: ExistingDocument): boolean {
+  if (!existing) return true;
+  return (
+    (object.etag || null) !== existing.etag ||
+    (object.size ?? null) !== existing.size ||
+    (object.lastModified?.toISOString() || null) !== existing.lastModified
+  );
+}
+
 function deleteObjectRows(
   db: Database.Database,
   params: { tenantId: string; knowledgeBaseId: string; bucketName: string; key: string },
@@ -309,95 +405,94 @@ function ftsMatchQuery(query: string): string | null {
   return tokens.map((token) => `"${token}"`).join(" OR ");
 }
 
-export async function updateKeywordIndex({
+export async function reconcileKeywordIndex({
   tenantId,
   knowledgeBaseId,
   bucketName,
-  objectKeys,
   credentials,
   region,
 }: KeywordIndexParams): Promise<KeywordIndexUpdateResult> {
   const { indexBucket, indexKey } = keywordIndexLocation(tenantId, knowledgeBaseId, bucketName);
-  const uniqueKeys = Array.from(new Set(objectKeys)).filter(isSupportedObject);
-  const skippedObjectCount = objectKeys.length - uniqueKeys.length;
-
-  if (uniqueKeys.length === 0) {
-    return {
-      indexBucket,
-      indexKey,
-      mode: "skipped",
-      indexedObjectCount: 0,
-      indexedChunkCount: 0,
-      skippedObjectCount,
-      errorCount: 0,
-      errors: [],
-    };
-  }
-
   const client = s3Client(region, credentials);
   const dbPath = tempIndexPath(tenantId, knowledgeBaseId);
   await downloadExistingIndex({ client, indexBucket, indexKey, dbPath });
 
+  const { objects, partial } = await listSupportedObjects({ client, bucketName });
   const db = initDatabase(dbPath);
   const maxObjectBytes = Number(process.env.KEYWORD_INDEX_MAX_OBJECT_BYTES || 50 * 1024 * 1024);
   const errors: string[] = [];
   let indexedObjectCount = 0;
   let indexedChunkCount = 0;
-  let skipped = skippedObjectCount;
+  let skippedObjectCount = 0;
+  let unchangedObjectCount = 0;
+  let deletedObjectCount = 0;
+  let changedObjectCount = 0;
 
-  const indexOne = db.transaction(
-    (params: {
-      key: string;
-      etag?: string;
-      size?: number;
-      lastModified?: Date;
-      chunks: string[];
-    }) => {
-      deleteObjectRows(db, { tenantId, knowledgeBaseId, bucketName, key: params.key });
-      insertObjectRows({
-        db,
-        tenantId,
-        knowledgeBaseId,
-        bucketName,
-        key: params.key,
-        etag: params.etag,
-        size: params.size,
-        lastModified: params.lastModified,
-        chunks: params.chunks,
-      });
-    },
-  );
+  const replaceOne = db.transaction((params: S3InventoryObject & { chunks: string[] }) => {
+    deleteObjectRows(db, { tenantId, knowledgeBaseId, bucketName, key: params.key });
+    insertObjectRows({
+      db,
+      tenantId,
+      knowledgeBaseId,
+      bucketName,
+      key: params.key,
+      etag: params.etag,
+      size: params.size,
+      lastModified: params.lastModified,
+      chunks: params.chunks,
+    });
+  });
+
+  const deleteOne = db.transaction((key: string) => {
+    deleteObjectRows(db, { tenantId, knowledgeBaseId, bucketName, key });
+  });
 
   try {
-    for (const key of uniqueKeys) {
-      try {
-        const head = await client.send(new HeadObjectCommand({ Bucket: bucketName, Key: key }));
-        const size = head.ContentLength ?? 0;
-        if (size > maxObjectBytes) {
-          skipped += 1;
-          continue;
-        }
+    const existing = existingDocuments(db, { tenantId, knowledgeBaseId, bucketName });
+    const s3Keys = new Set(objects.map((object) => object.key));
 
-        const object = await client.send(new GetObjectCommand({ Bucket: bucketName, Key: key }));
-        const buffer = await streamToBuffer(object.Body);
-        const text = await extractText(buffer, key);
+    if (!partial) {
+      for (const key of Array.from(existing.keys())) {
+        if (!s3Keys.has(key)) {
+          deleteOne(key);
+          deletedObjectCount += 1;
+        }
+      }
+    }
+
+    for (const object of objects) {
+      const previous = existing.get(object.key);
+      if (!hasObjectChanged(object, previous)) {
+        unchangedObjectCount += 1;
+        continue;
+      }
+
+      changedObjectCount += 1;
+      const size = object.size ?? 0;
+      if (size > maxObjectBytes) {
+        deleteOne(object.key);
+        skippedObjectCount += 1;
+        continue;
+      }
+
+      try {
+        const downloaded = await client.send(
+          new GetObjectCommand({ Bucket: bucketName, Key: object.key }),
+        );
+        const buffer = await streamToBuffer(downloaded.Body);
+        const text = await extractText(buffer, object.key);
         const chunks = chunkText(text);
         if (chunks.length === 0) {
-          skipped += 1;
+          deleteOne(object.key);
+          skippedObjectCount += 1;
           continue;
         }
 
-        indexOne({
-          key,
-          etag: head.ETag,
-          size,
-          lastModified: head.LastModified,
-          chunks,
-        });
+        replaceOne({ ...object, chunks });
         indexedObjectCount += 1;
         indexedChunkCount += chunks.length;
       } catch (err) {
-        errors.push(`${key}: ${err instanceof Error ? err.message : String(err)}`.slice(0, 500));
+        errors.push(`${object.key}: ${err instanceof Error ? err.message : String(err)}`.slice(0, 500));
       }
     }
 
@@ -418,11 +513,16 @@ export async function updateKeywordIndex({
   return {
     indexBucket,
     indexKey,
-    mode: "incremental",
+    mode: objects.length === 0 ? "skipped" : "reconcile",
+    listedObjectCount: objects.length,
+    changedObjectCount,
+    unchangedObjectCount,
+    deletedObjectCount,
     indexedObjectCount,
     indexedChunkCount,
-    skippedObjectCount: skipped,
+    skippedObjectCount,
     errorCount: errors.length,
+    partial,
     errors,
   };
 }

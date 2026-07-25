@@ -21,11 +21,16 @@ type IngestionStatus = {
 };
 
 type KeywordIndexStatus = {
-  mode: "incremental" | "skipped";
+  mode: "reconcile" | "skipped";
+  listedObjectCount: number;
+  changedObjectCount: number;
+  unchangedObjectCount: number;
+  deletedObjectCount: number;
   indexedObjectCount: number;
   indexedChunkCount: number;
   skippedObjectCount: number;
   errorCount: number;
+  partial: boolean;
   errors: string[];
 };
 
@@ -161,11 +166,7 @@ export default function KnowledgeBaseManager() {
     setKeywordIndexError(null);
     setIsSyncing(true);
 
-    const res = await fetch("/api/admin/kb/sync", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ uploadedKeys }),
-    });
+    const res = await fetch("/api/admin/kb/sync", { method: "POST" });
     if (!res.ok) {
       const data = await res.json().catch(() => null);
       setSyncError(
@@ -257,14 +258,21 @@ export default function KnowledgeBaseManager() {
           {keywordIndex && (
             <div className="text-sm text-muted-foreground">
               <p>
-                Keyword index: {keywordIndex.mode === "skipped" ? "no supported uploaded files" : "updated"}
-                {keywordIndex.mode === "incremental" &&
-                  ` (${keywordIndex.indexedObjectCount} files, ${keywordIndex.indexedChunkCount} chunks)`}
+                Keyword index: {keywordIndex.mode === "skipped" ? "no supported S3 files" : "reconciled"}
+                {keywordIndex.mode === "reconcile" &&
+                  ` (${keywordIndex.indexedObjectCount} indexed, ${keywordIndex.indexedChunkCount} chunks, ${keywordIndex.unchangedObjectCount} unchanged, ${keywordIndex.deletedObjectCount} deleted)`}
                 {keywordIndex.skippedObjectCount > 0 &&
                   `, skipped ${keywordIndex.skippedObjectCount}`}
+                {keywordIndex.partial && ", partial scan"}
                 {keywordIndex.errorCount > 0 && `, ${keywordIndex.errorCount} errors`}
                 .
               </p>
+              {keywordIndex.mode === "reconcile" && (
+                <p>
+                  Listed {keywordIndex.listedObjectCount} supported S3 objects;
+                  {` ${keywordIndex.changedObjectCount} changed or new`}.
+                </p>
+              )}
               {keywordIndex.errors.length > 0 && (
                 <ul className="mt-2 max-h-24 list-disc overflow-y-auto pl-5 font-mono text-xs text-destructive">
                   {keywordIndex.errors.map((error) => (
