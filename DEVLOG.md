@@ -219,3 +219,11 @@ While drafting the plan's deployment task, I quoted the live output of `aws ampl
 **Decision:** Change `/api/admin/kb/sync` to reconcile the keyword index from the tenant knowledge-base S3 data source every time sync runs. The reconcile path lists supported S3 objects, excludes the reserved keyword-index prefix, compares each object against SQLite `documents` metadata (`s3_key`, `etag`, `size`, `last_modified`), indexes new/changed files, skips unchanged files, and deletes SQLite rows for objects no longer present in S3 after a complete scan. Changed files that become oversized or text-empty now have stale FTS rows removed. The admin UI now reports listed, changed/new, unchanged, deleted, indexed, skipped, partial, and error counts.
 
 **Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck`, `npm run lint`, `npm test`, and `npm run build`. Not pushed; no Amplify deploy triggered.
+
+## 2026-07-24 — Chat generation failures return persisted fallback replies
+
+**Context:** After the keyword-index deployment, admin chat attempts could show the client-side generic "something went wrong" message when `/api/chat` returned HTTP 500. CloudWatch showed the route could complete RAG and LLM generation but fail while parsing invalid JSON from the model. Because the client treats non-2xx responses as failed sends, the visible reply did not match the server fallback and activity hydration could appear missing.
+
+**Decision:** Keep recording the underlying generation/parse failure as an `app_log`, but return the fallback assistant message as HTTP 200 with a stable response id, empty suggestions/categories, no redirect, debug data, and any already-retrieved RAG source headers. The existing server-side fallback chat persistence remains in place, so failed generation attempts still produce durable user/assistant activity records for authenticated users.
+
+**Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck`, `npm run lint`, `npm test`, and `npm run build`. Not pushed; no Amplify deploy triggered.

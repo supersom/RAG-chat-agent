@@ -1035,11 +1035,15 @@ export async function POST(req: Request) {
     // Handle errors in AI response generation
     console.error("💥 Error in message generation:", error);
     const errorResponse = {
+      id: crypto.randomUUID(),
       response:
         "Sorry, there was an issue processing your request. Please try again later.",
       thinking: "Error occurred during message generation.",
       user_mood: "neutral" as const,
+      suggested_questions: [],
+      matched_categories: [],
       debug: { context_used: false },
+      redirect_to_agent: { should_redirect: false },
     };
     await persistAppLogActivity({
       actor,
@@ -1073,9 +1077,18 @@ export async function POST(req: Request) {
       contextUsed: false,
       ragSources,
     });
-    return new Response(JSON.stringify(errorResponse), {
-      status: 500,
+    const fallbackApiResponse = new Response(JSON.stringify(errorResponse), {
+      status: 200,
       headers: { "Content-Type": "application/json" },
     });
+    if (ragSources.length > 0) {
+      fallbackApiResponse.headers.set(
+        "x-rag-sources",
+        sanitizeHeaderValue(JSON.stringify(ragSources)),
+      );
+    }
+    fallbackApiResponse.headers.set("X-Debug-Data", sanitizeHeaderValue(debugData));
+
+    return fallbackApiResponse;
   }
 }
