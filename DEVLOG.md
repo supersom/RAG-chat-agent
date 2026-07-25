@@ -314,3 +314,17 @@ While drafting the plan's deployment task, I quoted the live output of `aws ampl
 
 **Status:** Implemented. Deploy and final live confirmation pending as the next step — want to see a full corpus pass complete with zero real timeouts before considering the whole PDF-extraction chain closed.
 
+## 2026-07-25 02:57 PDT — 12s budget alone didn't fix the timeout; root-caused to a single pathological PDF, added a size cap
+
+**Context:** Deployed the 12s time-budget tuning fix and re-ran the live sync. It did **not** help: the resume chain hit a real platform timeout again (`Request timed out`) after a round had already run **28,004.90ms** — essentially identical to the original crash pattern, despite the lower budget. This exposed that the earlier fix addressed the wrong layer: the time-budget check only runs *between* objects in the loop, never *during* one, and JavaScript's single-threadedness means a long synchronous PDF parse can't be interrupted from within the same process no matter how low the between-object budget is set.
+
+**Investigation:** Downloaded the checkpointed `.sqlite` index directly from S3 (`aws s3 cp`) and read `reconcile_queue` to find exactly which object the failed round was about to process next — `pdfs/Debugging Tools for Windows (WinDbg, KD, CDB, NTSD).pdf`, 21MB, sitting first in queue order. Pulled it and timed `extractText` directly: **54,094ms**, extracting 4.5 million characters. For comparison, pulled two more real PDFs at different sizes to calibrate rather than guess: a 5MB paper extracted in ~2s, a 9.3MB reference manual in ~7.3s — both comfortably safe. The jump from 9.3MB(7.3s) to 21MB(54s) is clearly super-linear, not a simple size proportionality, so the danger zone starts somewhere between those two points.
+
+**Decision:** Per explicit product decision (identify and skip the specific problem file(s), rather than build a real per-object hard timeout via `worker_threads`, and rather than accept the limitation as-is) — added a PDF-specific size cap, separate from the existing general `maxObjectBytes` (50MB, which already correctly skips several even-larger files in this same bucket, e.g. a 99MB one, but was too permissive to catch this 21MB case). Set to 12MB by default (`KEYWORD_INDEX_MAX_PDF_BYTES` env override), chosen from the calibration data with margin below where the measured blowup began; checked against the actual remaining queue (1,360 objects) — this only excludes 49 PDFs (~3.6%), not the 105-263 a more conservative threshold would have caught. Only applies to `.pdf`; other extensions parse near-instantly regardless of size via a plain `buffer.toString("utf8")`, so they were never at risk. The check happens against the S3-listing-provided size metadata *before* downloading, so an oversized PDF is never even fetched.
+
+**TDD:** `app/lib/kb-keyword-index.test.ts` — one queued 20MB PDF and one 1KB PDF; asserts the large one is skipped and *never downloaded* (`GetObjectCommand` never called for its key) while the small one is indexed normally. Watched it fail for the right reason first (no size-based PDF filtering existed yet, so both got downloaded and the large one counted as indexed via the mock rather than skipped).
+
+**Verification:** `npx tsc --noEmit`, `next lint`, full suite (52/52), `next build` all clean.
+
+**Status:** Implemented and unit-tested. Deploy and a full live corpus pass (checking for zero real timeouts end to end, not just absence of `DOMMatrix`/`fake worker` errors) is the next and hopefully final step in this chain.
+

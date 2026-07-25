@@ -81,6 +81,7 @@ type KeywordIndexParams = {
   region?: string;
   timeBudgetMs?: number;
   now?: () => number;
+  maxPdfBytes?: number;
 };
 
 type ReconcileRunState = {
@@ -586,6 +587,16 @@ function ftsMatchQuery(query: string): string | null {
 // for that overrun to still land safely under the real wall.
 const DEFAULT_TIME_BUDGET_MS = 12_000;
 
+// The time budget can only stop the loop *between* objects - it can't
+// interrupt a single object's synchronous PDF parsing once started. Measured
+// live against real PDFs from this corpus: a 5MB PDF parsed in ~2s, 9.3MB in
+// ~7.3s, but a 21MB reference-manual PDF took 54s - well over the entire
+// platform timeout by itself, regardless of how low the time budget is set.
+// Capping PDF size specifically (other extensions parse near-instantly
+// regardless of size) keeps any single object's worst-case processing time
+// well clear of that wall, based on where the measured blowup began.
+const DEFAULT_MAX_PDF_BYTES = 12 * 1024 * 1024;
+
 export async function reconcileKeywordIndex({
   tenantId,
   knowledgeBaseId,
@@ -594,6 +605,7 @@ export async function reconcileKeywordIndex({
   region,
   timeBudgetMs,
   now = Date.now,
+  maxPdfBytes,
 }: KeywordIndexParams): Promise<KeywordIndexUpdateResult> {
   const { indexBucket, indexKey } = keywordIndexLocation(tenantId, knowledgeBaseId, bucketName);
   const client = s3Client(region, credentials);
@@ -602,6 +614,8 @@ export async function reconcileKeywordIndex({
 
   const db = initDatabase(dbPath);
   const maxObjectBytes = Number(process.env.KEYWORD_INDEX_MAX_OBJECT_BYTES || 50 * 1024 * 1024);
+  const maxPdfBytesLimit =
+    maxPdfBytes ?? Number(process.env.KEYWORD_INDEX_MAX_PDF_BYTES || DEFAULT_MAX_PDF_BYTES);
   const budgetMs =
     timeBudgetMs ?? Number(process.env.KEYWORD_INDEX_TIME_BUDGET_MS || DEFAULT_TIME_BUDGET_MS);
   const deadline = now() + budgetMs;
@@ -685,7 +699,9 @@ export async function reconcileKeywordIndex({
       if (now() >= deadline) break;
 
       const size = object.size ?? 0;
-      if (size > maxObjectBytes) {
+      const isOversizedPdf =
+        extensionForKey(object.key) === ".pdf" && size > maxPdfBytesLimit;
+      if (size > maxObjectBytes || isOversizedPdf) {
         deleteOne(object.key);
         run.skippedObjectCount += 1;
       } else {

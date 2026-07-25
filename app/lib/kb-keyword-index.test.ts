@@ -232,3 +232,79 @@ describe("extractText PDF worker handler", () => {
     expect((globalThis as any).pdfjsWorker).toBe(sentinel);
   });
 });
+
+describe("reconcileKeywordIndex oversized-PDF skip", () => {
+  const OVERSIZE_TENANT_ID = "test-tenant-oversize";
+  const OVERSIZE_KB_ID = "test-kb-oversize";
+
+  function oversizeDbPath() {
+    return tempDbPathFor(OVERSIZE_TENANT_ID, OVERSIZE_KB_ID);
+  }
+
+  beforeEach(() => {
+    if (fs.existsSync(oversizeDbPath())) fs.unlinkSync(oversizeDbPath());
+  });
+
+  afterEach(() => {
+    if (fs.existsSync(oversizeDbPath())) fs.unlinkSync(oversizeDbPath());
+  });
+
+  it("skips a PDF over the size cap without downloading it, but still processes a small one", async () => {
+    let storedIndexBody: Buffer | null = null;
+    const downloadedKeys: string[] = [];
+
+    const s3Objects = [
+      {
+        Key: "huge.pdf",
+        ETag: '"etag-huge"',
+        Size: 20 * 1024 * 1024,
+        LastModified: new Date("2026-01-01T00:00:00Z"),
+      },
+      {
+        Key: "small.pdf",
+        ETag: '"etag-small"',
+        Size: 1000,
+        LastModified: new Date("2026-01-01T00:00:00Z"),
+      },
+    ];
+
+    sendMock.mockImplementation(async (command: any) => {
+      const type = command.__type;
+      if (type === "GetObjectCommand") {
+        const key = command.input.Key as string;
+        if (key.endsWith(".sqlite")) {
+          if (!storedIndexBody) {
+            const err: any = new Error("NoSuchKey");
+            err.name = "NoSuchKey";
+            err.$metadata = { httpStatusCode: 404 };
+            throw err;
+          }
+          return { Body: storedIndexBody };
+        }
+        downloadedKeys.push(key);
+        return { Body: MINIMAL_PDF };
+      }
+      if (type === "ListObjectsV2Command") {
+        return { Contents: s3Objects, IsTruncated: false };
+      }
+      if (type === "PutObjectCommand") {
+        storedIndexBody = Buffer.from(command.input.Body);
+        return {};
+      }
+      throw new Error(`Unexpected command: ${type}`);
+    });
+
+    const result = await reconcileKeywordIndex({
+      tenantId: OVERSIZE_TENANT_ID,
+      knowledgeBaseId: OVERSIZE_KB_ID,
+      bucketName: BUCKET,
+      timeBudgetMs: 60_000,
+      now: () => 1_000_000,
+      maxPdfBytes: 12 * 1024 * 1024,
+    });
+
+    expect(result.skippedObjectCount).toBe(1);
+    expect(result.indexedObjectCount).toBe(1);
+    expect(downloadedKeys).toEqual(["small.pdf"]);
+  });
+});
