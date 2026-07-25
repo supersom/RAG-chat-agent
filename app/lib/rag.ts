@@ -11,7 +11,7 @@ import type { RAGSource } from "@/app/lib/rag-types";
 
 export type { RAGSource };
 
-function mergeSources(vectorSources: RAGSource[], keywordSources: RAGSource[], limit: number) {
+export function mergeSources(vectorSources: RAGSource[], keywordSources: RAGSource[], limit: number) {
   const merged = new Map<
     string,
     RAGSource & { vectorRank?: number; keywordRank?: number }
@@ -26,9 +26,16 @@ function mergeSources(vectorSources: RAGSource[], keywordSources: RAGSource[], l
     const key = source.s3Uri || source.id;
     const existing = merged.get(key);
     if (existing) {
-      existing.keywordRank = index + 1;
+      // Multiple returned chunks can belong to the same document (e.g. a
+      // dominant match for a narrow query) - keep the best (first-seen)
+      // rank rather than letting a later, worse chunk overwrite it.
+      if (existing.keywordRank === undefined) {
+        existing.keywordRank = index + 1;
+      }
       existing.snippet = existing.snippet || source.snippet;
-      existing.retrievalType = "vector";
+      if (existing.vectorRank !== undefined) {
+        existing.retrievalType = "vector";
+      }
     } else {
       merged.set(key, { ...source, keywordRank: index + 1 });
     }
@@ -111,7 +118,6 @@ export async function retrieveContext(
     if (tenantId) {
       try {
         const dataSource = await getKbDataSource(knowledgeBaseId);
-        console.log("🔎 [debug] getKbDataSource result:", dataSource);
         if (dataSource) {
           keywordSources = await searchKeywordIndex({
             tenantId,
@@ -122,7 +128,6 @@ export async function retrieveContext(
             credentials,
             region,
           });
-          console.log("🔎 [debug] searchKeywordIndex returned", keywordSources.length, "rows for tenantId", tenantId);
         }
       } catch (err) {
         console.error("Keyword index search failed:", err);

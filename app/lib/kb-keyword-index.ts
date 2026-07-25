@@ -791,22 +791,10 @@ export async function searchKeywordIndex({
 
   try {
     await downloadExistingIndex({ client, indexBucket, indexKey, dbPath });
-    console.log("🔎 [debug] searchKeywordIndex", {
-      indexBucket,
-      indexKey,
-      match,
-      dbExists: fs.existsSync(dbPath),
-      dbSize: fs.existsSync(dbPath) ? fs.statSync(dbPath).size : 0,
-    });
     if (!fs.existsSync(dbPath)) return [];
 
     const db = initDatabase(dbPath);
     try {
-      const countRow = db.prepare(
-        `SELECT COUNT(*) as c FROM chunks WHERE tenant_id = ? AND knowledge_base_id = ? AND bucket = ?`,
-      ).get(tenantId, knowledgeBaseId, bucketName) as { c: number };
-      console.log("🔎 [debug] chunks matching tenant/kb/bucket:", countRow.c, { tenantId, knowledgeBaseId, bucketName });
-
       const rows = db.prepare(
         `
           SELECT
