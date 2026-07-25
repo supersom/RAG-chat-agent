@@ -50,10 +50,7 @@ export async function retrieveContext(
       knowledgeBaseId: knowledgeBaseId,
       retrievalQuery: { text: query },
       retrievalConfiguration: {
-        vectorSearchConfiguration: {
-          numberOfResults: n,
-          overrideSearchType: "HYBRID",
-        },
+        vectorSearchConfiguration: { numberOfResults: n },
       },
     };
 

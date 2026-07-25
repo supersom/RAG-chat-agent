@@ -196,10 +196,10 @@ While drafting the plan's deployment task, I quoted the live output of `aws ampl
 
 **Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck`, `npm run lint`, and `npm test`. Not pushed; no Amplify deploy triggered.
 
-## 2026-07-24 — Request hybrid Bedrock KB retrieval
+## 2026-07-24 — Bedrock hybrid retrieval attempt reverted
 
-**Context:** Exact-token queries such as error codes, tenant IDs, route names, and config keys are weak spots for pure semantic/vector retrieval because the important term is often a literal identifier rather than a concept.
+**Context:** Exact-token queries such as arXiv IDs, error codes, tenant IDs, route names, and config keys are weak spots for pure semantic/vector retrieval because the important term is often a literal identifier rather than a concept. A live check against KB `SLXQFWWXPR` confirmed this: semantic retrieval for `What is 1406.2294 about?` did not return the source PDF named with `(1406.2294)`.
 
-**Decision:** Request Bedrock Knowledge Bases hybrid retrieval by setting `overrideSearchType: "HYBRID"` in the `RetrieveCommand` vector search configuration. RAG activity metadata now also records `requestedSearchType=HYBRID` so admins can see the intended retrieval mode in Activity Logs. Bedrock may still fall back to semantic search if the configured vector store does not support hybrid search.
+**Decision:** Tried `overrideSearchType: "HYBRID"` in the Bedrock `RetrieveCommand`, but the deployed KB returned `HYBRID search type is not supported for search operation on index SLXQFWWXPR`. Reverted the request override and the `requestedSearchType=HYBRID` activity metadata. This KB needs a separate keyword/BM25 index if the backing vector store cannot change.
 
-**Status:** Implemented locally on `worktree-tenant-llm-config` and verified with `npm run typecheck`, `npm run lint`, and `npm test`. Not pushed; no Amplify deploy triggered.
+**Status:** Reverted locally on `worktree-tenant-llm-config` and verified with `npm run typecheck`, `npm run lint`, and `npm test`. Not pushed; no Amplify deploy triggered.
