@@ -176,10 +176,26 @@ async function ensureDOMMatrixPolyfill(): Promise<void> {
   globalThis.DOMMatrix = DOMMatrixShim as unknown as typeof DOMMatrix;
 }
 
+async function ensurePdfWorkerHandler(): Promise<void> {
+  if ((globalThis as any).pdfjsWorker?.WorkerMessageHandler) return;
+  // pdfjs-dist's Node "fake worker" setup dynamically imports its own
+  // worker script via a runtime string path (`GlobalWorkerOptions.workerSrc`,
+  // defaulting to "./pdf.worker.mjs"), which Next's output file tracing
+  // doesn't follow, so the file never makes it into the deployed bundle
+  // ("Cannot find module '.../pdf.worker.mjs'"). It checks
+  // `globalThis.pdfjsWorker.WorkerMessageHandler` first and skips that
+  // dynamic import entirely if present, so importing the worker module
+  // ourselves - via a static, bundler-traceable specifier - and assigning
+  // it there sidesteps the broken path resolution rather than fixing it.
+  const workerModule = await import("pdfjs-dist/legacy/build/pdf.worker.mjs");
+  (globalThis as any).pdfjsWorker = { WorkerMessageHandler: workerModule.WorkerMessageHandler };
+}
+
 export async function extractText(buffer: Buffer, key: string): Promise<string> {
   const ext = extensionForKey(key);
   if (ext === ".pdf") {
     await ensureDOMMatrixPolyfill();
+    await ensurePdfWorkerHandler();
     const { PDFParse } = await import("pdf-parse");
     const parser = new PDFParse({ data: new Uint8Array(buffer) });
     try {

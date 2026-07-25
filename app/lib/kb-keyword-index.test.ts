@@ -203,3 +203,32 @@ describe("extractText DOMMatrix polyfill", () => {
     expect((globalThis as any).DOMMatrix).toBe(ExistingDOMMatrix);
   });
 });
+
+describe("extractText PDF worker handler", () => {
+  const originalPdfjsWorker = (globalThis as any).pdfjsWorker;
+
+  afterEach(() => {
+    if (originalPdfjsWorker === undefined) {
+      delete (globalThis as any).pdfjsWorker;
+    } else {
+      (globalThis as any).pdfjsWorker = originalPdfjsWorker;
+    }
+  });
+
+  it("installs a main-thread pdfjsWorker handler before parsing a PDF, when none is set", async () => {
+    delete (globalThis as any).pdfjsWorker;
+
+    await extractText(MINIMAL_PDF, "doc.pdf");
+
+    expect(typeof (globalThis as any).pdfjsWorker?.WorkerMessageHandler).toBe("function");
+  });
+
+  it("does not overwrite an already-present pdfjsWorker handler", async () => {
+    const sentinel = { WorkerMessageHandler: function ExistingHandler() {} };
+    (globalThis as any).pdfjsWorker = sentinel;
+
+    await extractText(MINIMAL_PDF, "doc.pdf");
+
+    expect((globalThis as any).pdfjsWorker).toBe(sentinel);
+  });
+});
