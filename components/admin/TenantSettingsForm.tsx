@@ -35,6 +35,9 @@ export default function TenantSettingsForm({
   const [requireEndUserAuth, setRequireEndUserAuth] = useState(
     tenant.requireEndUserAuth,
   );
+  const [disableKeywordSearch, setDisableKeywordSearch] = useState(
+    tenant.disableKeywordSearch ?? false,
+  );
   const [guardrailId, setGuardrailId] = useState(tenant.guardrailId);
   const [guardrailVersion, setGuardrailVersion] = useState(
     tenant.guardrailVersion,
@@ -71,6 +74,7 @@ export default function TenantSettingsForm({
       body: JSON.stringify({
         knowledgeBaseId,
         requireEndUserAuth,
+        disableKeywordSearch,
         guardrailId,
         guardrailVersion,
         allowedOrigins: parseList(allowedOrigins),
@@ -126,6 +130,18 @@ export default function TenantSettingsForm({
             />
             <span className="text-sm font-medium">
               Require end-user authentication
+            </span>
+          </label>
+
+          <label className="flex items-center gap-2 cursor-pointer w-fit">
+            <input
+              type="checkbox"
+              checked={disableKeywordSearch}
+              onChange={(e) => setDisableKeywordSearch(e.target.checked)}
+              className="h-4 w-4 accent-primary"
+            />
+            <span className="text-sm font-medium">
+              Disable keyword search
             </span>
           </label>
 

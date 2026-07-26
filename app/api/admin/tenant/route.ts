@@ -10,6 +10,7 @@ const editableTenantSchema = z
   .object({
     knowledgeBaseId: z.string().optional(),
     requireEndUserAuth: z.boolean().optional(),
+    disableKeywordSearch: z.boolean().optional(),
     guardrailId: z.string().optional(),
     guardrailVersion: z.string().optional(),
     allowedOrigins: z.array(z.string()).optional(),

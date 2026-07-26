@@ -41,11 +41,20 @@ export function mergeSources(vectorSources: RAGSource[], keywordSources: RAGSour
     }
   });
 
+  // RRF only makes sense once keyword search has actually contributed
+  // results to fuse against. When it hasn't (disabled, or no matches),
+  // fall back to the original semantic similarity score so the UI's
+  // score-based color legend (calibrated for 0-1 cosine scores) still holds.
+  const usingRRF = keywordSources.length > 0;
+
   return Array.from(merged.values())
     .map((source) => {
-      const vectorBoost = source.vectorRank ? 1 / (60 + source.vectorRank) : 0;
-      const keywordBoost = source.keywordRank ? 1 / (60 + source.keywordRank) : 0;
-      const score = vectorBoost + keywordBoost || source.score;
+      let score = source.score;
+      if (usingRRF) {
+        const vectorBoost = source.vectorRank ? 1 / (60 + source.vectorRank) : 0;
+        const keywordBoost = source.keywordRank ? 1 / (60 + source.keywordRank) : 0;
+        score = vectorBoost + keywordBoost || source.score;
+      }
       const { vectorRank, keywordRank, ...rest } = source;
       return { ...rest, score: Number(score.toFixed(6)) };
     })
@@ -60,6 +69,7 @@ export async function retrieveContext(
   credentials?: { accessKeyId?: string; secretAccessKey?: string },
   region?: string,
   tenantId?: string,
+  disableKeywordSearch?: boolean,
 ): Promise<{
   context: string;
   isRagWorking: boolean;
@@ -115,7 +125,7 @@ export async function retrieveContext(
       .slice(0, n);
 
     let keywordSources: RAGSource[] = [];
-    if (tenantId) {
+    if (tenantId && !disableKeywordSearch) {
       try {
         const dataSource = await getKbDataSource(knowledgeBaseId);
         if (dataSource) {

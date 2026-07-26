@@ -11,6 +11,7 @@ export interface Tenant {
     allowedModels?: string[];
   };
   requireEndUserAuth: boolean;
+  disableKeywordSearch?: boolean;
   guardrailId: string;
   guardrailVersion: string;
   allowedOrigins?: string[];

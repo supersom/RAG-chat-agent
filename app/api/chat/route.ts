@@ -673,6 +673,7 @@ export async function POST(req: Request) {
       tenant.awsCredentials,
       tenant.awsRegion,
       tenant.tenantId,
+      tenant.disableKeywordSearch,
     );
     retrievedContext = result.context;
     isRagWorking = result.isRagWorking;

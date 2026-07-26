@@ -54,4 +54,24 @@ describe("mergeSources", () => {
     const result = merged.find((source) => source.s3Uri === target);
     expect(result?.retrievalType).toBe("keyword");
   });
+
+  it("uses the raw semantic score, not RRF, when keyword search contributed nothing", () => {
+    const vectorSources = [
+      { ...vectorSource(1, "s3://bucket/pdfs/a.pdf"), score: 0.72 },
+    ];
+
+    const merged = mergeSources(vectorSources, [], 3);
+
+    expect(merged[0].score).toBe(0.72);
+  });
+
+  it("uses RRF fusion scores when keyword search did contribute results", () => {
+    const target = "s3://bucket/pdfs/target.pdf";
+    const vectorSources = [{ ...vectorSource(1, target), score: 0.72 }];
+    const keywordSources = [keywordSource(1, target)];
+
+    const merged = mergeSources(vectorSources, keywordSources, 3);
+
+    expect(merged[0].score).toBeCloseTo(2 / 61, 6);
+  });
 });
