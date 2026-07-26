@@ -352,3 +352,19 @@ Remaining, not addressed and not blocking: the ~1,360-object corpus will take ma
 
 **Separate issue surfaced during verification, not fixed:** with RAG now correctly returning the right context, the live chat request twice failed downstream with "Sorry, something went wrong processing that message" - both times a hard platform timeout at exactly ~28,003ms with nothing logged between "Claude Generation Start" and the timeout. The tenant's configured default model is a free-tier OpenRouter model (`nvidia/nemotron-3-ultra-550b-a55b:free`, `configSource=tenant`), which is known to queue/hang under load. This is unrelated to the RAG fix (RAG retrieval itself completes in ~3-4s every time) and not investigated further this session - noted in BACKLOG.md.
 
+## 2026-07-26 00:48 PDT — Per-tenant keyword-search toggle, and RRF was silently nuking the match-score display for pure-vector results
+
+**Context:** Two asks in the same session: (1) let a tenant disable keyword search from admin settings, (2) explain why the UI's match-score badge was reading ~2% instead of the expected 60-90%+ for what looked like a strong hit.
+
+**Feature:** Added `disableKeywordSearch?: boolean` to `Tenant` (`app/lib/db/schema.ts`), following the existing `requireEndUserAuth` precedent exactly (zod schema in `app/api/admin/tenant/route.ts`, checkbox + state in `components/admin/TenantSettingsForm.tsx`, no changes needed in `tenants.ts`/`tenant-redact.ts` since both already pass arbitrary top-level `Tenant` fields through generically). Threaded as a new positional param through `retrieveContext` (`app/lib/rag.ts`) and `app/api/chat/route.ts`'s call site, gating the existing `if (tenantId)` guard around `searchKeywordIndex` to `if (tenantId && !disableKeywordSearch)`.
+
+**Root cause of the 2% score:** `mergeSources` (`app/lib/rag.ts`) was unconditionally replacing every source's score with the RRF fusion formula `1/(60+rank)`, *even for tenants/queries where keyword search contributed nothing at all* (disabled by the new checkbox, or simply zero keyword hits). Since RRF scores are small rank-based reciprocals (max ~3.3% for a double top-1 hit, ~1.6% for a single top-1 hit) rather than the original Bedrock cosine-similarity score (0-90%+ range), this silently made `RightSidebar.tsx`'s color legend (`>0.6` green, `>0.4` yellow) permanently unreachable - not a retrieval regression, a pure display bug introduced when RRF fusion was added.
+
+**Decision:** Per user instruction - keep RRF exactly as-is when it's actually fusing vector + keyword results (`keywordSources.length > 0`), but fall back to the original semantic score when keyword search contributed nothing, so the pre-existing color legend is meaningful again for that case. Implemented as a `usingRRF` flag inside `mergeSources` gating which formula runs, rather than two code paths.
+
+**TDD:** `app/lib/rag.test.ts` - two new tests: vector-only merge keeps the raw `0.72` score untouched; vector+keyword merge still produces the RRF-fused `2/61` score. Both pass alongside the two pre-existing merge tests.
+
+**Verification:** `npx tsc --noEmit` clean, `next lint` clean, full suite 56/56 passing.
+
+**Status:** Implemented, committed (`632a100`, on top of `847d0ad`), **not pushed** per explicit instruction - this repo's push triggers an Amplify deploy, and the user wanted to hold off. Still on `worktree-tenant-llm-config`, PR #3 not yet merged.
+
