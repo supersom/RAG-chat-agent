@@ -24,6 +24,16 @@ output "kb2_knowledge_base_id" {
   description = "Must match the knowledgeBaseId field on any tenant record pointed at this KB"
 }
 
+output "pool_knowledge_base_id" {
+  value       = module.pool.knowledge_base_id
+  description = "The pooled KB's ID -- required as a CLI arg/env var by Task 5's migration script; not known until this module is applied"
+}
+
+output "pool_source_bucket_name" {
+  value       = aws_s3_bucket.pool_source.id
+  description = "The pooled KB's source bucket name -- required as a CLI arg/env var by Task 5's migration script"
+}
+
 output "preview_amplify_app_id" {
   value = aws_amplify_app.preview.id
 }
