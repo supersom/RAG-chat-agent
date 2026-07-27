@@ -4,6 +4,7 @@ export interface Tenant {
   tenantId: string;
   name: string;
   knowledgeBaseId: string;
+  kbTier?: "pooled" | "dedicated";
   llmProviderDefaults?: {
     provider?: LlmProvider;
     apiKeyCiphertext?: string;
