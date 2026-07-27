@@ -6,6 +6,10 @@ output "users_table_name" {
   value = aws_dynamodb_table.users.name
 }
 
+output "activity_table_name" {
+  value = aws_dynamodb_table.activity.name
+}
+
 output "guardrail_id" {
   value = aws_bedrock_guardrail.default.guardrail_id
 }

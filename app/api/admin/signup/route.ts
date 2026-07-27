@@ -36,10 +36,7 @@ export async function POST(req: Request) {
     tenantId: ulid(),
     name: tenantName,
     knowledgeBaseId: process.env.NEXT_PUBLIC_KNOWLEDGE_BASE_ID || "",
-    llmProviderDefaults: {
-      provider: "openai",
-      model: "gpt-4o-mini",
-    },
+    llmProviderDefaults: {},
     requireEndUserAuth: false,
     guardrailId: "",
     guardrailVersion: "",

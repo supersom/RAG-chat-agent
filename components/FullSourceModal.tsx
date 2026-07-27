@@ -7,7 +7,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { RAGSource } from "@/app/lib/utils";
+import type { RAGSource } from "@/app/lib/rag-types";
 
 interface FullSourceModalProps {
   isOpen: boolean;

@@ -1,6 +1,7 @@
 import { auth } from "@/auth";
 import { getTenant } from "@/app/lib/db/tenants";
 import TenantSettingsForm from "@/components/admin/TenantSettingsForm";
+import { redactTenant } from "@/app/lib/tenant-redact";
 
 export default async function AdminSettingsPage() {
   const session = await auth();
@@ -25,7 +26,7 @@ export default async function AdminSettingsPage() {
 
   return (
     <div className="p-4 max-w-2xl mx-auto">
-      <TenantSettingsForm tenant={tenant} />
+      <TenantSettingsForm tenant={redactTenant(tenant)} />
     </div>
   );
 }

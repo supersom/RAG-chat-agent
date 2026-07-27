@@ -24,6 +24,8 @@ resource "aws_iam_user_policy" "dynamodb_tenants_users" {
           aws_dynamodb_table.tenants.arn,
           aws_dynamodb_table.users.arn,
           "${aws_dynamodb_table.users.arn}/index/*",
+          aws_dynamodb_table.activity.arn,
+          "${aws_dynamodb_table.activity.arn}/index/*",
         ]
       },
     ]

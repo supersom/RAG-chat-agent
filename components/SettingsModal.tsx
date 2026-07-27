@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Settings, Eye, EyeOff, Upload, Download } from "lucide-react";
+import { Settings, Upload, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -11,6 +11,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { MaskedInput } from "@/components/ui/masked-input";
 
 export const SETTINGS_KEY = "rag-chat-settings";
 
@@ -54,26 +55,14 @@ function SecretField({
   placeholder: string;
   onChange: (v: string) => void;
 }) {
-  const [visible, setVisible] = useState(false);
   return (
     <div className="flex flex-col gap-1">
       <label className="text-sm font-medium">{label}</label>
-      <div className="relative">
-        <Input
-          type={visible ? "text" : "password"}
-          placeholder={placeholder}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          className="pr-10"
-        />
-        <button
-          type="button"
-          onClick={() => setVisible((v) => !v)}
-          className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-        >
-          {visible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-        </button>
-      </div>
+      <MaskedInput
+        placeholder={placeholder}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      />
     </div>
   );
 }
