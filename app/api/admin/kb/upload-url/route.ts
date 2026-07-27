@@ -59,10 +59,10 @@ export async function POST(req: Request) {
     );
   }
 
-  const key = addHashSuffix(
+  const key = `tenants/${tenant.tenantId}/${addHashSuffix(
     sanitizeFilename(parsed.data.filename),
     parsed.data.dedupeKey,
-  );
+  )}`;
 
   const client = new S3Client({
     region: process.env.AWS_REGION || process.env.BAWS_REGION || "us-east-1",
@@ -76,6 +76,20 @@ export async function POST(req: Request) {
     client,
     new PutObjectCommand({ Bucket: dataSource.bucketName, Key: key }),
     { expiresIn: 300 },
+  );
+
+  // Written directly (not presigned) so the client can never supply its own
+  // tenantId -- Bedrock reads this sidecar during ingestion to attach
+  // metadata to every chunk generated from the document next to it.
+  await client.send(
+    new PutObjectCommand({
+      Bucket: dataSource.bucketName,
+      Key: `${key}.metadata.json`,
+      Body: JSON.stringify({
+        metadataAttributes: { tenantId: tenant.tenantId },
+      }),
+      ContentType: "application/json",
+    }),
   );
 
   const isShared = await isKnowledgeBaseSharedWithOtherTenants(

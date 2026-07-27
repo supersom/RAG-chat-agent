@@ -226,8 +226,8 @@ export default function KnowledgeBaseManager() {
           {isShared && (
             <p className="rounded-md border border-yellow-600/40 bg-yellow-600/10 p-3 text-sm text-yellow-700 dark:text-yellow-400">
               Note: this knowledge base is shared with at least one other
-              organization. Documents you add here will be visible to their
-              chat as well.
+              organization. Documents are stored in shared infrastructure,
+              scoped to your organization by access control.
             </p>
           )}
           <div className="flex flex-col gap-3">
