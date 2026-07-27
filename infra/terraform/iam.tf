@@ -46,6 +46,7 @@ resource "aws_iam_user_policy" "kb_source_bucket_upload" {
         Resource = [
           "arn:aws:s3:::claude-qkstrt-kb/*",
           "arn:aws:s3:::css-agent-kb2-materiality-src/*",
+          "arn:aws:s3:::css-agent-kb-pool-src/*",
         ]
       },
     ]
