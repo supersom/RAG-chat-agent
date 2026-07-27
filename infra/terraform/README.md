@@ -89,11 +89,31 @@ real test of that code, not as a routine, pre-validated operation.
 
   The module's other code path -- what runs for a hypothetical new KB where
   `manage_vector_store` is left at its default `true` -- creates those
-  resources via the same `null_resource`/CLI-fallback mechanism. That path
-  has never been exercised by a live `terraform apply` anywhere in this plan;
-  no new KB has been created through it. It should be treated as unvalidated
-  until someone actually runs it, not assumed to work because the pre-existing
-  KBs' import path works.
+  resources via the same `null_resource`/CLI-fallback mechanism.
+
+  **Live-tested end to end on 2026-07-27** (create, verify, destroy, verify
+  clean) against a throwaway `kb3smoketest` instance -- not just `validate`.
+  Two real findings from that run:
+
+  - `null_resource.knowledge_base` and `null_resource.data_source` originally
+    had no destroy-time provisioner at all. `terraform destroy` removed them
+    from state without ever calling the AWS API, leaving the real KB and data
+    source orphaned in AWS -- and in a broken state, since `vector_index`'s
+    own destroy provisioner *did* exist and would delete the S3 Vectors index
+    the orphaned KB still referenced. Fixed: both resources now capture their
+    own AWS-assigned ID at create time (the data source's ID wasn't being
+    captured at all before) and delete themselves on destroy, so the actual
+    destroy order (Terraform destroys in reverse dependency order) is
+    data source -> knowledge base -> vector index -> vector bucket, verified
+    by checking AWS directly after a real destroy (not just checking
+    `terraform state list`).
+  - `aws bedrock-agent create-knowledge-base` can fail with `ValidationException:
+    ... unable to assume the given role` on the *first* apply of a brand-new
+    KB, because IAM role/policy creation hasn't finished propagating yet when
+    Bedrock tries to assume it milliseconds later. This is IAM's own
+    eventual consistency, not a bug in this module -- a retried `apply` a few
+    seconds later succeeds (confirmed live). No automatic retry/wait is built
+    in; if a first apply fails with this specific error, just re-run apply.
 
 - **`aws_amplify_branch` cannot track `compute_role_arn`.** The live Amplify
   branch does have a `computeRoleArn` set (confirmed via `aws amplify

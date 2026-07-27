@@ -233,6 +233,22 @@ resource "null_resource" "knowledge_base" {
         --query 'knowledgeBase.knowledgeBaseId' --output text > "$${TMPDIR:-/tmp}/${var.name_prefix}-kb-id.txt"
     EOT
   }
+
+  # Previously missing entirely: a `terraform destroy` removed this resource
+  # from state without ever calling the AWS API, leaving the real Bedrock KB
+  # orphaned -- and left in a broken state once vector_index's own destroy
+  # provisioner (below) deleted the index it still referenced. Reads the same
+  # tmp file the create step wrote, keyed off `self.triggers` (populated from
+  # config at creation, so it's available at destroy time even though the KB
+  # ID itself isn't known until after the create command runs).
+  provisioner "local-exec" {
+    when    = destroy
+    command = <<-EOT
+      aws bedrock-agent delete-knowledge-base \
+        --knowledge-base-id "$(cat "$${TMPDIR:-/tmp}/${self.triggers.name}-kb-id.txt")" \
+        --region ${self.triggers.region}
+    EOT
+  }
 }
 
 data "external" "kb_id" {
@@ -259,7 +275,29 @@ resource "null_resource" "data_source" {
         --knowledge-base-id ${data.external.kb_id[0].result.id} \
         --name "${var.name_prefix}-source" \
         --data-source-configuration '{"type":"S3","s3Configuration":{"bucketArn":"${var.source_bucket_arn}"}}' \
-        --region ${var.aws_region}
+        --region ${var.aws_region} \
+        --query 'dataSource.dataSourceId' --output text > "$${TMPDIR:-/tmp}/${var.name_prefix}-ds-id.txt"
     EOT
   }
+
+  # Same gap as knowledge_base above: no destroy action existed, so the data
+  # source was left orphaned (and the create step never even captured its own
+  # ID -- there was nothing to delete it *by*, even if a destroy step had
+  # existed). Both fixed together here.
+  provisioner "local-exec" {
+    when    = destroy
+    command = <<-EOT
+      aws bedrock-agent delete-data-source \
+        --knowledge-base-id ${self.triggers.knowledge_base_id} \
+        --data-source-id "$(cat "$${TMPDIR:-/tmp}/${self.triggers.name}-ds-id.txt")" \
+        --region ${self.triggers.region}
+    EOT
+  }
+}
+
+data "external" "ds_id" {
+  count      = var.manage_vector_store ? 1 : 0
+  depends_on = [null_resource.data_source]
+
+  program = ["bash", "-c", "echo \"{\\\"id\\\": \\\"$(cat \"$${TMPDIR:-/tmp}/${var.name_prefix}-ds-id.txt\")\\\"}\""]
 }

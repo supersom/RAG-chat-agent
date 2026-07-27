@@ -3,6 +3,11 @@ output "knowledge_base_id" {
   value       = var.manage_vector_store ? one(data.external.kb_id[*].result.id) : var.existing_knowledge_base_id
 }
 
+output "data_source_id" {
+  description = "The Bedrock data source ID. Only available when manage_vector_store = true (KB1/KB2 don't expose theirs through this module -- see existing_knowledge_base_id)."
+  value       = var.manage_vector_store ? one(data.external.ds_id[*].result.id) : null
+}
+
 output "kb_execution_role_name" {
   description = "Name of the KB execution IAM role (the only resource managed for pre-existing KBs)."
   value       = aws_iam_role.kb_execution.name
