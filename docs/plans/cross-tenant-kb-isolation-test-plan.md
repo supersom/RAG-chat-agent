@@ -1,6 +1,6 @@
 # Plan: Cross-Tenant Knowledge Base Isolation Test
 
-Status: **ready for QA execution** — the pooled KB architecture and mandatory metadata filter isolation mechanism are implemented. This doc describes the test scenario and manual QA steps to verify isolation.
+Status: **blocked on infrastructure — not yet executable.** The application code is implemented and merged: the mandatory `tenantId` metadata filter on every retrieval, `tenants/{tenantId}/` key namespacing, and `.metadata.json` sidecar writing. The pooled Knowledge Base itself does not exist yet — Task 4's Terraform (`module.pool`, `aws_s3_bucket.pool_source`) has not been applied, and Task 5's migration has not been run. This doc describes the test scenario and the manual QA steps to run **once that infrastructure exists**.
 
 ## Goal
 
@@ -19,14 +19,21 @@ Both documents answer the same topic but with **different specific numbers**, so
 
 ## KB architecture
 
-A single pooled Bedrock Knowledge Base (e.g., `SLXQFWWXPR`) with a shared S3 data source bucket (`claude-qkstrt-kb`). Every chunk uploaded goes through the upload flow in `app/api/admin/kb/upload-url/route.ts`, which:
+A single pooled Bedrock Knowledge Base — `module.pool` in `infra/terraform/bedrock_kb.tf` — with a shared S3 data source bucket, `aws_s3_bucket.pool_source` / `css-agent-kb-pool-src` in `infra/terraform/s3.tf`. The KB is referred to here by Terraform resource name because Bedrock assigns its ID at creation time and the module has not been applied yet; substitute the real ID once `terraform apply` has run. This is a *new* KB and bucket: the legacy `SLXQFWWXPR` / `claude-qkstrt-kb` pair is KB1 and its own dedicated bucket, not the pool.
+
+Every chunk uploaded goes through the upload flow in `app/api/admin/kb/upload-url/route.ts`, which:
 
 1. Namespaces the object key under `tenants/{tenantId}/{filename}`.
-2. Writes a `.metadata.json` sidecar file with `{ tenantId: "<tenant-id>" }` so Bedrock attaches the `tenantId` metadata to every indexed chunk.
+2. Writes a `{key}.metadata.json` sidecar file containing `{"metadataAttributes": {"tenantId": "<tenant-id>"}}` — Bedrock only reads tenant metadata under the `metadataAttributes` wrapper — so it attaches the `tenantId` metadata to every indexed chunk.
 
 The embedding model is `amazon.titan-embed-text-v2:0` (FLOAT32), unchanged from the existing KB.
 
 ## Manual QA test
+
+### Prerequisites (none of these have happened yet)
+
+1. `terraform apply` in `infra/terraform` to create `module.pool` and `aws_s3_bucket.pool_source`; record the KB ID Bedrock assigns.
+2. Run `scripts/migrate-tenants-to-pool.ts` for the two tenants under test, so their content lives under `tenants/{tenantId}/` in the pool bucket and they point at the pool KB.
 
 ### Setup
 
@@ -64,11 +71,11 @@ This filter is passed to Bedrock's `RetrieveCommand` on every request, regardles
 ### Upload/metadata flow
 
 - **`app/api/admin/kb/upload-url/route.ts`** generates presigned URLs with keys namespaced as `tenants/{tenantId}/{sanitizedFilename}`.
-- **Metadata sidecar** (`.metadata.json`) in the same namespace includes `{ tenantId: "<tenant-id>" }`.
+- **Metadata sidecar** (`{key}.metadata.json`) in the same namespace contains `{"metadataAttributes": {"tenantId": "<tenant-id>"}}`. `scripts/migrate-tenants-to-pool.ts` writes the identical shape for every object it copies in.
 - **Bedrock data source ingestion** reads both the document and its sidecar, attaching the `tenantId` metadata to every indexed chunk.
 
 ## Backlog notes
 
-- This is a planned test, not yet executed live. Test data (documents A and B) are ready in the shared knowledge-base bucket.
+- This is a planned test, not yet executed live, and it cannot be executed until the prerequisites above are met. The test documents (A and B) exist in the legacy buckets; they still need to reach the pool bucket under their tenant namespaces.
 - The test assumes both tenant documents have been successfully indexed in the pooled KB. If indexing fails or is incomplete, chunks with the intended metadata may not be present for retrieval — verify ingestion job status before running the test.
 - Future enhancement: automate this test via a dedicated integration test that provisions test documents, runs concurrent queries, and validates source URIs programmatically rather than as a manual QA step.

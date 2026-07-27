@@ -405,6 +405,15 @@ async function main() {
       console.warn(`  WARNING: possible cross-tenant leakage for ${tenantId}:`);
       for (const r of unexpected) console.warn(`    ${r.uri}`);
     }
+    // The symmetric failure: the filter is holding but this tenant's own
+    // content never came back, i.e. the copy or the sidecar metadata did not
+    // take. Nothing else in this run would flag that, and migrations are
+    // expected to run tenant-by-tenant rather than all at once.
+    if (own.length === 0) {
+      console.warn(
+        `  WARNING: no content under tenants/${tenantId}/ came back for ${tenantId} - check that its objects and .metadata.json sidecars ingested successfully.`,
+      );
+    }
   }
 }
 
