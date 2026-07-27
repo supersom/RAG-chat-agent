@@ -49,6 +49,29 @@ resource "aws_iam_user_policy" "kb_source_bucket_upload" {
           "arn:aws:s3:::css-agent-kb-pool-src/*",
         ]
       },
+      {
+        # The app itself never reads from these buckets (uploads are
+        # single-object PutObject via presigned URL; Bedrock reads through
+        # its own KB execution role, not this user). scripts/migrate-tenants-to-pool.ts
+        # is the first caller that needs to list+read the legacy source
+        # buckets, to copy their objects into the pool.
+        Sid    = "KBSourceBucketMigrationRead"
+        Effect = "Allow"
+        Action = ["s3:ListBucket"]
+        Resource = [
+          "arn:aws:s3:::claude-qkstrt-kb",
+          "arn:aws:s3:::css-agent-kb2-materiality-src",
+        ]
+      },
+      {
+        Sid    = "KBSourceBucketMigrationGet"
+        Effect = "Allow"
+        Action = ["s3:GetObject"]
+        Resource = [
+          "arn:aws:s3:::claude-qkstrt-kb/*",
+          "arn:aws:s3:::css-agent-kb2-materiality-src/*",
+        ]
+      },
     ]
   })
 }
