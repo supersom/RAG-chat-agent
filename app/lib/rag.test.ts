@@ -1,6 +1,21 @@
-import { describe, expect, it } from "vitest";
-import { mergeSources } from "@/app/lib/rag";
+import { describe, expect, it, vi, beforeEach } from "vitest";
+
+const sendMock = vi.fn();
+
+vi.mock("@aws-sdk/client-bedrock-agent-runtime", () => ({
+  BedrockAgentRuntimeClient: vi.fn().mockImplementation(function () {
+    return { send: sendMock };
+  }),
+  RetrieveCommand: vi.fn().mockImplementation(function (input) {
+    return { input };
+  }),
+}));
+
+import { RetrieveCommand } from "@aws-sdk/client-bedrock-agent-runtime";
+import { mergeSources, retrieveContext } from "@/app/lib/rag";
 import type { RAGSource } from "@/app/lib/rag-types";
+
+const mockedRetrieveCommand = vi.mocked(RetrieveCommand);
 
 function keywordSource(rank: number, s3Uri: string): RAGSource {
   return {
@@ -23,6 +38,33 @@ function vectorSource(rank: number, s3Uri: string): RAGSource {
     s3Uri,
   };
 }
+
+beforeEach(() => {
+  sendMock.mockReset();
+  sendMock.mockResolvedValue({ retrievalResults: [] });
+  mockedRetrieveCommand.mockClear();
+});
+
+describe("retrieveContext", () => {
+  it("always includes a tenantId equality filter scoped to the passed tenant", async () => {
+    await retrieveContext("what is my balance", "kb-123", "tenant-a", 3, undefined, undefined, true);
+
+    expect(mockedRetrieveCommand).toHaveBeenCalledTimes(1);
+    const input = mockedRetrieveCommand.mock.calls[0][0] as any;
+    expect(input.retrievalConfiguration.vectorSearchConfiguration.filter).toEqual({
+      equals: { key: "tenantId", value: "tenant-a" },
+    });
+  });
+
+  it("scopes the filter to whichever tenantId is passed, not a hardcoded value", async () => {
+    await retrieveContext("what is my balance", "kb-123", "tenant-b", 5, undefined, undefined, true);
+
+    const input = mockedRetrieveCommand.mock.calls[0][0] as any;
+    expect(input.retrievalConfiguration.vectorSearchConfiguration.filter).toEqual({
+      equals: { key: "tenantId", value: "tenant-b" },
+    });
+  });
+});
 
 describe("mergeSources", () => {
   it("keeps a document's best keyword rank when multiple top chunks come from the same document", () => {

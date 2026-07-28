@@ -65,10 +65,10 @@ export function mergeSources(vectorSources: RAGSource[], keywordSources: RAGSour
 export async function retrieveContext(
   query: string,
   knowledgeBaseId: string,
+  tenantId: string,
   n: number = 3,
   credentials?: { accessKeyId?: string; secretAccessKey?: string },
   region?: string,
-  tenantId?: string,
   disableKeywordSearch?: boolean,
 ): Promise<{
   context: string;
@@ -97,7 +97,10 @@ export async function retrieveContext(
       knowledgeBaseId: knowledgeBaseId,
       retrievalQuery: { text: query },
       retrievalConfiguration: {
-        vectorSearchConfiguration: { numberOfResults: n },
+        vectorSearchConfiguration: {
+          numberOfResults: n,
+          filter: { equals: { key: "tenantId", value: tenantId } },
+        },
       },
     };
 
@@ -125,7 +128,7 @@ export async function retrieveContext(
       .slice(0, n);
 
     let keywordSources: RAGSource[] = [];
-    if (tenantId && !disableKeywordSearch) {
+    if (!disableKeywordSearch) {
       try {
         const dataSource = await getKbDataSource(knowledgeBaseId);
         if (dataSource) {

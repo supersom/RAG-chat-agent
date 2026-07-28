@@ -137,9 +137,31 @@ function extensionForKey(key: string): string {
   return path.extname(key.split("?")[0] || "").toLowerCase();
 }
 
+// Pool-bucket objects are namespaced under tenants/<tenantId>/ (see
+// app/api/admin/kb/upload-url/route.ts and scripts/migrate-tenants-to-pool.ts);
+// the legacy per-KB buckets keep their objects flat at the bucket root.
+const TENANT_NAMESPACE_ROOT = "tenants/";
+
+function tenantKeyPrefix(tenantId: string): string {
+  return `${TENANT_NAMESPACE_ROOT}${tenantId}/`;
+}
+
+// A key namespaced under *another* tenant is never this tenant's content, in
+// any bucket. A key with no namespace at all is, because only the legacy
+// single-KB buckets have those. Deciding from the key shape rather than from
+// tenant.kbTier keeps this failing closed: kbTier is unset for every tenant
+// that exists today, so a tier-driven check would silently not filter.
+function belongsToTenant(key: string, tenantId: string): boolean {
+  if (!key.startsWith(TENANT_NAMESPACE_ROOT)) return true;
+  return key.startsWith(tenantKeyPrefix(tenantId));
+}
+
 function isSupportedObject(key: string): boolean {
   if (!key || key.endsWith("/")) return false;
   if (key.startsWith(`${keywordIndexPrefix()}/`)) return false;
+  // Bedrock ingestion sidecars, not tenant content - mirrors
+  // isMigratableObject in scripts/migrate-tenants-to-pool.ts.
+  if (key.endsWith(".metadata.json")) return false;
   return SUPPORTED_EXTENSIONS.has(extensionForKey(key));
 }
 
@@ -417,12 +439,16 @@ async function downloadExistingIndex({
   }
 }
 
-async function listSupportedObjects({
+async function listObjectsUnder({
   client,
   bucketName,
+  tenantId,
+  prefix,
 }: {
   client: S3Client;
   bucketName: string;
+  tenantId: string;
+  prefix?: string;
 }): Promise<{ objects: S3InventoryObject[]; partial: boolean }> {
   const maxObjects = Number(process.env.KEYWORD_INDEX_MAX_RECONCILE_OBJECTS || 0);
   const objects: S3InventoryObject[] = [];
@@ -433,6 +459,7 @@ async function listSupportedObjects({
     const page = await client.send(
       new ListObjectsV2Command({
         Bucket: bucketName,
+        Prefix: prefix,
         ContinuationToken: continuationToken,
       }),
     );
@@ -440,6 +467,7 @@ async function listSupportedObjects({
     for (const object of page.Contents ?? []) {
       const key = object.Key;
       if (!key || !isSupportedObject(key)) continue;
+      if (!belongsToTenant(key, tenantId)) continue;
       objects.push({
         key,
         etag: object.ETag,
@@ -457,6 +485,34 @@ async function listSupportedObjects({
   } while (continuationToken);
 
   return { objects, partial };
+}
+
+async function listSupportedObjects({
+  client,
+  bucketName,
+  tenantId,
+}: {
+  client: S3Client;
+  bucketName: string;
+  tenantId: string;
+}): Promise<{ objects: S3InventoryObject[]; partial: boolean }> {
+  // Scope the listing to this tenant's namespace first: in the pool bucket
+  // that is the only content this tenant may index, and an unscoped list
+  // would hand every other tenant's documents to insertObjectRows, which
+  // stamps whatever it is given with *this* tenant's id.
+  const scoped = await listObjectsUnder({
+    client,
+    bucketName,
+    tenantId,
+    prefix: tenantKeyPrefix(tenantId),
+  });
+  if (scoped.objects.length > 0 || scoped.partial) return scoped;
+
+  // Nothing under the namespace: either a legacy bucket, whose objects sit
+  // flat at the root, or a pooled tenant that has not uploaded anything yet.
+  // A full listing covers the first case; belongsToTenant still drops any
+  // other tenant's namespaced keys, so the second case stays isolated too.
+  return listObjectsUnder({ client, bucketName, tenantId });
 }
 
 function existingDocuments(
@@ -568,6 +624,12 @@ function insertObjectRows({
   });
 }
 
+// A tenant id is arbitrary text, and LIKE treats "_" as a single-character
+// wildcard - unescaped, tenant "acme_eu" would match "acme-eu"'s namespace.
+function escapeLikeLiteral(value: string): string {
+  return value.replace(/[\\%_]/g, (char) => `\\${char}`);
+}
+
 function ftsMatchQuery(query: string): string | null {
   const tokens = query
     .match(/[a-zA-Z0-9][a-zA-Z0-9._/-]*/g)
@@ -651,7 +713,11 @@ export async function reconcileKeywordIndex({
       // Fresh run: list the bucket once, decide what changed, and run the
       // stale-object deletion sweep - all of this depends on having the full
       // current listing, so none of it is repeated on a resumed invocation.
-      const { objects, partial: listingPartial } = await listSupportedObjects({ client, bucketName });
+      const { objects, partial: listingPartial } = await listSupportedObjects({
+        client,
+        bucketName,
+        tenantId,
+      });
       const existing = existingDocuments(db, { tenantId, knowledgeBaseId, bucketName });
       const s3Keys = new Set(objects.map((object) => object.key));
 
@@ -808,10 +874,23 @@ export async function searchKeywordIndex({
             AND tenant_id = ?
             AND knowledge_base_id = ?
             AND bucket = ?
+            AND (s3_key NOT LIKE ? OR s3_key LIKE ? ESCAPE '\\')
           ORDER BY rank ASC
           LIMIT ?
         `,
-      ).all(match, tenantId, knowledgeBaseId, bucketName, limit) as Array<{
+      ).all(
+        match,
+        tenantId,
+        knowledgeBaseId,
+        bucketName,
+        // tenant_id alone trusts whatever the indexer stamped on the row. An
+        // index built before the listing was scoped (or by a future scoping
+        // bug) holds other tenants' keys under this tenant's id, so the key's
+        // own namespace has to be checked at read time as well.
+        `${TENANT_NAMESPACE_ROOT}%`,
+        `${escapeLikeLiteral(tenantKeyPrefix(tenantId))}%`,
+        limit,
+      ) as Array<{
         rowid: number;
         s3Key: string;
         fileName: string;

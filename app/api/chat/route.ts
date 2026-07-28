@@ -669,10 +669,10 @@ export async function POST(req: Request) {
     const result = await retrieveContext(
       latestMessage,
       tenant.knowledgeBaseId,
+      tenant.tenantId,
       3,
       tenant.awsCredentials,
       tenant.awsRegion,
-      tenant.tenantId,
       tenant.disableKeywordSearch,
     );
     retrievedContext = result.context;
