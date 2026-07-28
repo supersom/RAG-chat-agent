@@ -10,32 +10,26 @@ vi.mock("@/app/lib/db/tenants", () => ({
 
 vi.mock("@/app/lib/bedrock-kb", () => ({
   getKbDataSource: vi.fn(),
-  ingestKnowledgeBaseDocuments: vi.fn(),
-  deleteKnowledgeBaseDocuments: vi.fn(),
 }));
 
 vi.mock("@/app/lib/kb-keyword-index", () => ({
   reconcileKeywordIndex: vi.fn(),
   trackTenantObjects: vi.fn(),
+  submitVectorSync: vi.fn(),
 }));
 
 import { auth } from "@/auth";
 import { getTenant } from "@/app/lib/db/tenants";
-import {
-  getKbDataSource,
-  ingestKnowledgeBaseDocuments,
-  deleteKnowledgeBaseDocuments,
-} from "@/app/lib/bedrock-kb";
-import { reconcileKeywordIndex, trackTenantObjects } from "@/app/lib/kb-keyword-index";
+import { getKbDataSource } from "@/app/lib/bedrock-kb";
+import { reconcileKeywordIndex, trackTenantObjects, submitVectorSync } from "@/app/lib/kb-keyword-index";
 import { POST } from "./route";
 
 const mockedAuth = vi.mocked(auth);
 const mockedGetTenant = vi.mocked(getTenant);
 const mockedGetKbDataSource = vi.mocked(getKbDataSource);
-const mockedIngest = vi.mocked(ingestKnowledgeBaseDocuments);
-const mockedDelete = vi.mocked(deleteKnowledgeBaseDocuments);
 const mockedReconcile = vi.mocked(reconcileKeywordIndex);
 const mockedTrackTenantObjects = vi.mocked(trackTenantObjects);
+const mockedSubmitVectorSync = vi.mocked(submitVectorSync);
 
 function makeRequest(body?: Record<string, unknown>): Request {
   return new Request("http://localhost/api/admin/kb/sync", {
@@ -76,10 +70,9 @@ beforeEach(() => {
   mockedAuth.mockReset();
   mockedGetTenant.mockReset();
   mockedGetKbDataSource.mockReset();
-  mockedIngest.mockReset();
-  mockedDelete.mockReset();
   mockedReconcile.mockReset();
   mockedTrackTenantObjects.mockReset();
+  mockedSubmitVectorSync.mockReset();
 
   mockedAuth.mockResolvedValue({
     user: { role: "admin", tenantId: "acme" },
@@ -88,10 +81,14 @@ beforeEach(() => {
     dataSourceId: "ds-1",
     bucketName: "pooled-bucket",
   } as never);
-  mockedIngest.mockResolvedValue([{ key: "tenants/acme/a.pdf", status: "STARTING" }] as never);
-  mockedDelete.mockResolvedValue([] as never);
   mockedReconcile.mockResolvedValue(diffResult() as never);
   mockedTrackTenantObjects.mockResolvedValue(diffResult() as never);
+  mockedSubmitVectorSync.mockResolvedValue({
+    submittedCount: 1,
+    deletedCount: 0,
+    documents: [{ key: "tenants/acme/a.pdf", status: "STARTING" }],
+    partial: false,
+  } as never);
   mockedGetTenant.mockResolvedValue({
     tenantId: "acme",
     knowledgeBaseId: "kb-acme",
@@ -100,7 +97,7 @@ beforeEach(() => {
 });
 
 describe("POST /api/admin/kb/sync", () => {
-  it("ingests only the changed keys by default (incremental mode)", async () => {
+  it("passes the diff and mode through to submitVectorSync", async () => {
     mockedReconcile.mockResolvedValue(
       diffResult({ listedKeys: ["a", "b"], changedKeys: ["b"] }) as never,
     );
@@ -108,37 +105,24 @@ describe("POST /api/admin/kb/sync", () => {
     const res = await POST(makeRequest());
     const data = await res.json();
 
-    expect(mockedIngest).toHaveBeenCalledWith(
-      expect.objectContaining({ keys: ["b"] }),
+    expect(mockedSubmitVectorSync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "incremental",
+        usesTrackingFile: false,
+        diff: expect.objectContaining({ listedKeys: ["a", "b"], changedKeys: ["b"] }),
+      }),
     );
-    expect(data.vectorSync.mode).toBe("incremental");
     expect(data.vectorSync.submittedCount).toBe(1);
   });
 
-  it("ingests every listed key in full mode, not just the changed ones", async () => {
-    mockedReconcile.mockResolvedValue(
-      diffResult({ listedKeys: ["a", "b"], changedKeys: ["b"] }) as never,
-    );
-
+  it("passes mode: full through when requested", async () => {
     const res = await POST(makeRequest({ mode: "full" }));
     const data = await res.json();
 
-    expect(mockedIngest).toHaveBeenCalledWith(
-      expect.objectContaining({ keys: ["a", "b"] }),
+    expect(mockedSubmitVectorSync).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: "full" }),
     );
-    expect(data.vectorSync.mode).toBe("full");
-  });
-
-  it("deletes keys that were removed from S3", async () => {
-    mockedReconcile.mockResolvedValue(
-      diffResult({ deletedKeys: ["tenants/acme/gone.pdf"] }) as never,
-    );
-
-    await POST(makeRequest());
-
-    expect(mockedDelete).toHaveBeenCalledWith(
-      expect.objectContaining({ keys: ["tenants/acme/gone.pdf"] }),
-    );
+    expect(data.vectorSync).not.toBeNull();
   });
 
   it("never touches vector sync when the diff came back partial", async () => {
@@ -147,8 +131,7 @@ describe("POST /api/admin/kb/sync", () => {
     const res = await POST(makeRequest());
     const data = await res.json();
 
-    expect(mockedIngest).not.toHaveBeenCalled();
-    expect(mockedDelete).not.toHaveBeenCalled();
+    expect(mockedSubmitVectorSync).not.toHaveBeenCalled();
     expect(data.vectorSync).toBeNull();
   });
 
@@ -169,8 +152,8 @@ describe("POST /api/admin/kb/sync", () => {
     expect(mockedReconcile).not.toHaveBeenCalled();
     expect(mockedTrackTenantObjects).toHaveBeenCalledTimes(1);
     expect(data.keywordIndex).toBeNull();
-    expect(mockedIngest).toHaveBeenCalledWith(
-      expect.objectContaining({ keys: ["tenants/acme/a.pdf"] }),
+    expect(mockedSubmitVectorSync).toHaveBeenCalledWith(
+      expect.objectContaining({ usesTrackingFile: true }),
     );
     expect(data.vectorSync.submittedCount).toBe(1);
   });
@@ -178,8 +161,23 @@ describe("POST /api/admin/kb/sync", () => {
   it("does not run vector sync (or trackTenantObjects) on a keyword-index-only resume", async () => {
     await POST(makeRequest({ resumeKeywordIndexOnly: true }));
 
-    expect(mockedIngest).not.toHaveBeenCalled();
-    expect(mockedDelete).not.toHaveBeenCalled();
+    expect(mockedSubmitVectorSync).not.toHaveBeenCalled();
+  });
+
+  it("resumes vector sync directly, skipping keyword-index/diff work entirely, on a vector-sync-only resume", async () => {
+    const res = await POST(makeRequest({ resumeVectorSyncOnly: true, mode: "full" }));
+    const data = await res.json();
+
+    expect(mockedReconcile).not.toHaveBeenCalled();
+    expect(mockedTrackTenantObjects).not.toHaveBeenCalled();
+    expect(mockedSubmitVectorSync).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: "full" }),
+    );
+    // No diff is passed on a resume - submitVectorSync continues its own
+    // checkpointed queue instead of re-seeding.
+    expect(mockedSubmitVectorSync.mock.calls[0][0]).not.toHaveProperty("diff");
+    expect(data.keywordIndex).toBeNull();
+    expect(data.vectorSync).not.toBeNull();
   });
 
   it("rejects unauthenticated requests before touching AWS", async () => {
@@ -188,6 +186,6 @@ describe("POST /api/admin/kb/sync", () => {
     const res = await POST(makeRequest());
 
     expect(res.status).toBe(401);
-    expect(mockedIngest).not.toHaveBeenCalled();
+    expect(mockedSubmitVectorSync).not.toHaveBeenCalled();
   });
 });

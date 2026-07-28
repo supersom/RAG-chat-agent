@@ -23,6 +23,7 @@ type VectorSyncStatus = {
   submittedCount: number;
   deletedCount: number;
   documents: DocumentSyncStatus[];
+  partial: boolean;
 };
 
 type KeywordIndexStatus = {
@@ -55,6 +56,15 @@ const POLL_INTERVAL_MS = 5000;
 
 type UploadableFile = File & { webkitRelativePath?: string };
 
+function mergeDocuments(
+  existing: DocumentSyncStatus[],
+  incoming: DocumentSyncStatus[],
+): DocumentSyncStatus[] {
+  const byKey = new Map(existing.map((doc) => [doc.key, doc]));
+  for (const doc of incoming) byKey.set(doc.key, doc);
+  return Array.from(byKey.values());
+}
+
 export default function KnowledgeBaseManager() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -67,7 +77,13 @@ export default function KnowledgeBaseManager() {
 
   const [vectorSync, setVectorSync] = useState<VectorSyncStatus | null>(null);
   const [vectorSyncError, setVectorSyncError] = useState<string | null>(null);
+  const [isVectorSyncSubmitting, setIsVectorSyncSubmitting] = useState(false);
   const [isVectorSyncPolling, setIsVectorSyncPolling] = useState(false);
+  // Accumulates every key ever submitted across a whole (possibly
+  // multi-round, checkpointed) vector sync, so status polling covers keys
+  // submitted in later resume rounds too, not just the first round's.
+  const submittedKeysRef = useRef<Set<string>>(new Set());
+  const isVectorSyncSubmittingRef = useRef(false);
   const [keywordIndex, setKeywordIndex] = useState<KeywordIndexStatus | null>(null);
   const [keywordIndexError, setKeywordIndexError] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -164,14 +180,19 @@ export default function KnowledgeBaseManager() {
     }
   }
 
-  async function pollDocumentStatuses(keys: string[]) {
+  // Watches Bedrock's own eventual status (STARTING -> INDEXED/FAILED/etc)
+  // for every key submitted so far. Reads submittedKeysRef fresh each round
+  // rather than a fixed key list, so keys submitted in a later checkpointed
+  // resume round get picked up automatically; keeps polling as long as
+  // either something's still non-terminal or submission is still ongoing
+  // (more keys may still show up).
+  async function pollDocumentStatuses() {
+    const keys = Array.from(submittedKeysRef.current);
     if (keys.length === 0) {
       setIsVectorSyncPolling(false);
       return;
     }
 
-    // POST, not a GET query param - a large tenant's key list doesn't fit in
-    // a URL (a full sync's ~2,000 keys join to over 200,000 characters).
     const res = await fetch("/api/admin/kb/sync/status", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -183,15 +204,63 @@ export default function KnowledgeBaseManager() {
     }
 
     const { documents } = (await res.json()) as { documents: DocumentSyncStatus[] };
-    setVectorSync((current) => (current ? { ...current, documents } : current));
+    setVectorSync((current) =>
+      current ? { ...current, documents: mergeDocuments(current.documents, documents) } : current,
+    );
 
     const stillPending = documents.some(
       (doc) => !doc.status || !TERMINAL_DOCUMENT_STATUSES.has(doc.status),
     );
-    if (stillPending) {
-      setTimeout(() => pollDocumentStatuses(keys), POLL_INTERVAL_MS);
+    if (stillPending || isVectorSyncSubmittingRef.current) {
+      setTimeout(pollDocumentStatuses, POLL_INTERVAL_MS);
     } else {
       setIsVectorSyncPolling(false);
+    }
+  }
+
+  function trackSubmittedKeys(vs: VectorSyncStatus) {
+    for (const doc of vs.documents) submittedKeysRef.current.add(doc.key);
+    setVectorSync((current) =>
+      current
+        ? { ...vs, documents: mergeDocuments(current.documents, vs.documents) }
+        : vs,
+    );
+    if (!isVectorSyncPolling && submittedKeysRef.current.size > 0) {
+      setIsVectorSyncPolling(true);
+      pollDocumentStatuses();
+    }
+  }
+
+  // Vector sync (tenant-scoped Ingest/DeleteKnowledgeBaseDocuments) is
+  // checkpointed server-side too: a large tenant needs more batches than
+  // Bedrock's real, account-wide rate limit can clear inside one request, so
+  // `vectorSync.partial: true` means "call again to submit more" - same
+  // resume shape as the keyword index, just a separate, independent chain.
+  async function resumeVectorSync(mode: SyncMode) {
+    isVectorSyncSubmittingRef.current = true;
+    setIsVectorSyncSubmitting(true);
+    try {
+      const res = await fetch("/api/admin/kb/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resumeVectorSyncOnly: true, mode }),
+      });
+      if (!res.ok) return;
+
+      const { vectorSync: newVectorSync, vectorSyncError: newVectorSyncError } = await res.json();
+      if (newVectorSyncError) {
+        setVectorSyncError(newVectorSyncError);
+        return;
+      }
+      if (!newVectorSync) return;
+
+      trackSubmittedKeys(newVectorSync);
+      if (newVectorSync.partial) {
+        await resumeVectorSync(mode);
+      }
+    } finally {
+      isVectorSyncSubmittingRef.current = false;
+      setIsVectorSyncSubmitting(false);
     }
   }
 
@@ -199,8 +268,9 @@ export default function KnowledgeBaseManager() {
   // `partial: true` when it had to checkpoint instead of finishing. Keep
   // resuming it until it reports a full pass, so a large knowledge base's
   // first sync completes as several small requests instead of timing out as
-  // one big one. Vector sync (tenant-scoped IngestKnowledgeBaseDocuments)
-  // only ever fires on the initial, non-resume request - see the route.
+  // one big one. Vector sync only ever starts fresh on the initial,
+  // non-resume request - see resumeVectorSync for its own independent
+  // resume chain.
   async function runSync(mode: SyncMode, resumeOnly: boolean) {
     setIsKeywordIndexSyncing(true);
     try {
@@ -228,12 +298,12 @@ export default function KnowledgeBaseManager() {
       setKeywordIndexError(newKeywordIndexError ?? null);
 
       if (!resumeOnly) {
-        setVectorSync(newVectorSync ?? null);
         setVectorSyncError(newVectorSyncError ?? null);
-        const keys: string[] = newVectorSync?.documents?.map((doc: DocumentSyncStatus) => doc.key) ?? [];
-        if (keys.length > 0) {
-          setIsVectorSyncPolling(true);
-          pollDocumentStatuses(keys);
+        if (newVectorSync) {
+          trackSubmittedKeys(newVectorSync);
+          if (newVectorSync.partial) {
+            resumeVectorSync(mode);
+          }
         }
       }
 
@@ -251,6 +321,7 @@ export default function KnowledgeBaseManager() {
     setVectorSyncError(null);
     setKeywordIndex(null);
     setKeywordIndexError(null);
+    submittedKeysRef.current = new Set();
     setIsSyncing(true);
     try {
       await runSync(mode, false);
@@ -259,7 +330,8 @@ export default function KnowledgeBaseManager() {
     }
   }
 
-  const syncing = isSyncing || isKeywordIndexSyncing || isVectorSyncPolling;
+  const syncing =
+    isSyncing || isKeywordIndexSyncing || isVectorSyncSubmitting || isVectorSyncPolling;
   const failedDocumentCount =
     vectorSync?.documents.filter((doc) => doc.status === "FAILED").length ?? 0;
 
@@ -323,10 +395,13 @@ export default function KnowledgeBaseManager() {
           <CardDescription>
             Newly uploaded documents aren&apos;t searchable until a sync
             completes. Both options only ever touch your organization&apos;s
-            own documents. &quot;Sync uploaded docs&quot; is the fast path -
-            it only indexes what&apos;s new, changed, or removed since the
-            last sync. &quot;Full sync&quot; re-indexes every document you
-            have, useful if something looks out of date.
+            own documents. &quot;Sync unindexed docs&quot; is the fast path -
+            it indexes anything new, changed, or not yet successfully
+            indexed (including a file left over from an interrupted sync),
+            and removes anything deleted. &quot;Full sync&quot; re-indexes
+            every document you have, useful if something looks out of date.
+            A large knowledge base may take several rounds to finish -
+            keep this page open until it reports done.
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
@@ -336,7 +411,7 @@ export default function KnowledgeBaseManager() {
               disabled={syncing}
               className="w-fit"
             >
-              {syncing ? "Syncing..." : "Sync uploaded docs"}
+              {syncing ? "Syncing..." : "Sync unindexed docs"}
             </Button>
             <Button
               onClick={() => handleSync("full")}
@@ -384,9 +459,13 @@ export default function KnowledgeBaseManager() {
             <div className="text-sm text-muted-foreground">
               <p>
                 Vector index ({vectorSync.mode}): submitted{" "}
-                {vectorSync.submittedCount}, deleted {vectorSync.deletedCount}
+                {submittedKeysRef.current.size}, deleted {vectorSync.deletedCount}
                 {failedDocumentCount > 0 && `, ${failedDocumentCount} failed`}
-                {isVectorSyncPolling ? " - indexing..." : "."}
+                {isVectorSyncSubmitting
+                  ? " - submitting more..."
+                  : isVectorSyncPolling
+                    ? " - indexing..."
+                    : "."}
               </p>
               {failedDocumentCount > 0 && (
                 <ul className="mt-2 max-h-24 list-disc overflow-y-auto pl-5 font-mono text-xs text-destructive">

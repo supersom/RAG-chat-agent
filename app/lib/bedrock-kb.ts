@@ -10,13 +10,19 @@ import {
   type KnowledgeBaseDocumentDetail,
 } from "@aws-sdk/client-bedrock-agent";
 
-// Live-confirmed: bounded concurrency (default 8, see runBatchesWithConcurrency
-// below) against IngestKnowledgeBaseDocuments can trigger real
-// ThrottlingException bursts - the SDK's default maxAttempts (3) wasn't
-// enough for all concurrent workers' retries to clear the same burst. Raising
-// it gives the SDK's own exponential-backoff-with-jitter retry logic more
-// room to self-heal, rather than hand-rolling a separate retry mechanism.
-const DEFAULT_MAX_ATTEMPTS = 8;
+// Raising this above the SDK default (3) was tried first, to let bounded
+// concurrency self-heal through real ThrottlingException bursts via the
+// SDK's own exponential-backoff retries. Live-confirmed downside: a single
+// in-flight batch's internal retries (at maxAttempts=8) can balloon well
+// past a checkpoint's time budget on their own - deadline/now in
+// runBatchesWithConcurrency only stops picking up *new* batches, it can't
+// interrupt one already deep into its own backoff. Measured live: a 15s
+// budget took 43s wall-clock because of this. Now that vector sync is
+// checkpointed end to end (submitVectorSync), a batch that fails just stays
+// queued for the next round instead of needing to survive via exhausting
+// retries within this one - so a modest bump over the SDK default is enough
+// to smooth transient blips, without the runaway worst-case latency.
+const DEFAULT_MAX_ATTEMPTS = 4;
 
 function getClient(): BedrockAgentClient {
   return new BedrockAgentClient({
@@ -138,9 +144,19 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// A time budget for the batching loop itself: a large tenant needs more
+// batches than a 5 req/s account-wide rate limit can clear inside one HTTP
+// request (live math: ~1,833 files -> ~184 batches -> minimum ~37s at 5/s,
+// already past Amplify's ~28s wall before any real latency). deadline/now
+// let a caller stop picking up *new* batches once the budget runs out
+// (in-flight ones still finish) and see exactly which keys were actually
+// processed via the returned results, so unprocessed keys can be
+// checkpointed for the next round - same pattern reconcileKeywordIndex
+// already uses for its own per-object loop.
 async function runBatchesWithConcurrency<T, R>(
   items: T[],
   worker: (batch: T[]) => Promise<R[]>,
+  options?: { deadline?: number; now?: () => number },
 ): Promise<R[]> {
   const batches = batch(items, DOCUMENT_BATCH_SIZE);
   const concurrency = Math.min(
@@ -148,20 +164,32 @@ async function runBatchesWithConcurrency<T, R>(
     batches.length,
   );
   const pacingMs = Number(process.env.KB_SYNC_BATCH_PACING_MS ?? DEFAULT_BATCH_PACING_MS);
+  const now = options?.now ?? Date.now;
+  const deadline = options?.deadline ?? Infinity;
   const results: R[][] = new Array(batches.length);
   let nextIndex = 0;
 
   async function runNext(): Promise<void> {
     while (nextIndex < batches.length) {
+      if (now() >= deadline) return;
       const index = nextIndex;
       nextIndex += 1;
       if (index > 0 && pacingMs > 0) await sleep(pacingMs);
-      results[index] = await worker(batches[index]);
+      try {
+        results[index] = await worker(batches[index]);
+      } catch (err) {
+        // One batch exhausting retries (e.g. sustained throttling) must not
+        // discard results from every *other* batch's concurrent worker -
+        // that batch's keys simply stay unprocessed and get retried on the
+        // caller's next checkpointed round, exactly like a batch that never
+        // got picked up before the deadline.
+        console.error("Batch failed, will be retried next round:", err);
+      }
     }
   }
 
   await Promise.all(Array.from({ length: concurrency }, runNext));
-  return results.flat();
+  return results.filter(Boolean).flat();
 }
 
 function s3Uri(bucketName: string, key: string): string {
@@ -182,68 +210,82 @@ function keyFromDetail(detail: KnowledgeBaseDocumentDetail, bucketName: string):
 // rejects inline metadata attributes paired with S3-sourced content on an
 // S3 data source - "You can only upload content and metadata from S3 if
 // your knowledge base is connected to an S3 data source").
-export async function ingestKnowledgeBaseDocuments(params: {
-  knowledgeBaseId: string;
-  dataSourceId: string;
-  bucketName: string;
-  keys: string[];
-}): Promise<DocumentSyncResult[]> {
+export async function ingestKnowledgeBaseDocuments(
+  params: {
+    knowledgeBaseId: string;
+    dataSourceId: string;
+    bucketName: string;
+    keys: string[];
+  },
+  options?: { deadline?: number; now?: () => number },
+): Promise<DocumentSyncResult[]> {
   if (params.keys.length === 0) return [];
   const client = getClient();
 
-  return runBatchesWithConcurrency(params.keys, async (keyBatch) => {
-    const response = await client.send(
-      new IngestKnowledgeBaseDocumentsCommand({
-        knowledgeBaseId: params.knowledgeBaseId,
-        dataSourceId: params.dataSourceId,
-        documents: keyBatch.map((key) => ({
-          content: {
-            dataSourceType: "S3",
-            s3: { s3Location: { uri: s3Uri(params.bucketName, key) } },
-          },
-          metadata: {
-            type: "S3_LOCATION",
-            s3Location: { uri: s3Uri(params.bucketName, `${key}.metadata.json`) },
-          },
-        })),
-      }),
-    );
+  return runBatchesWithConcurrency(
+    params.keys,
+    async (keyBatch) => {
+      const response = await client.send(
+        new IngestKnowledgeBaseDocumentsCommand({
+          knowledgeBaseId: params.knowledgeBaseId,
+          dataSourceId: params.dataSourceId,
+          documents: keyBatch.map((key) => ({
+            content: {
+              dataSourceType: "S3",
+              s3: { s3Location: { uri: s3Uri(params.bucketName, key) } },
+            },
+            metadata: {
+              type: "S3_LOCATION",
+              s3Location: { uri: s3Uri(params.bucketName, `${key}.metadata.json`) },
+            },
+          })),
+        }),
+      );
 
-    return (response.documentDetails ?? []).map((detail) => ({
-      key: keyFromDetail(detail, params.bucketName),
-      status: detail.status,
-      statusReason: detail.statusReason,
-    }));
-  });
+      return (response.documentDetails ?? []).map((detail) => ({
+        key: keyFromDetail(detail, params.bucketName),
+        status: detail.status,
+        statusReason: detail.statusReason,
+      }));
+    },
+    options,
+  );
 }
 
-export async function deleteKnowledgeBaseDocuments(params: {
-  knowledgeBaseId: string;
-  dataSourceId: string;
-  bucketName: string;
-  keys: string[];
-}): Promise<DocumentSyncResult[]> {
+export async function deleteKnowledgeBaseDocuments(
+  params: {
+    knowledgeBaseId: string;
+    dataSourceId: string;
+    bucketName: string;
+    keys: string[];
+  },
+  options?: { deadline?: number; now?: () => number },
+): Promise<DocumentSyncResult[]> {
   if (params.keys.length === 0) return [];
   const client = getClient();
 
-  return runBatchesWithConcurrency(params.keys, async (keyBatch) => {
-    const response = await client.send(
-      new DeleteKnowledgeBaseDocumentsCommand({
-        knowledgeBaseId: params.knowledgeBaseId,
-        dataSourceId: params.dataSourceId,
-        documentIdentifiers: keyBatch.map((key) => ({
-          dataSourceType: "S3",
-          s3: { uri: s3Uri(params.bucketName, key) },
-        })),
-      }),
-    );
+  return runBatchesWithConcurrency(
+    params.keys,
+    async (keyBatch) => {
+      const response = await client.send(
+        new DeleteKnowledgeBaseDocumentsCommand({
+          knowledgeBaseId: params.knowledgeBaseId,
+          dataSourceId: params.dataSourceId,
+          documentIdentifiers: keyBatch.map((key) => ({
+            dataSourceType: "S3",
+            s3: { uri: s3Uri(params.bucketName, key) },
+          })),
+        }),
+      );
 
-    return (response.documentDetails ?? []).map((detail) => ({
-      key: keyFromDetail(detail, params.bucketName),
-      status: detail.status,
-      statusReason: detail.statusReason,
-    }));
-  });
+      return (response.documentDetails ?? []).map((detail) => ({
+        key: keyFromDetail(detail, params.bucketName),
+        status: detail.status,
+        statusReason: detail.statusReason,
+      }));
+    },
+    options,
+  );
 }
 
 // Polls the current status of previously submitted documents (ingested or

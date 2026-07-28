@@ -21,11 +21,20 @@ vi.mock("@aws-sdk/client-s3", () => ({
   }),
 }));
 
+const ingestMock = vi.fn();
+const deleteMock = vi.fn();
+
+vi.mock("@/app/lib/bedrock-kb", () => ({
+  ingestKnowledgeBaseDocuments: (...args: unknown[]) => ingestMock(...args),
+  deleteKnowledgeBaseDocuments: (...args: unknown[]) => deleteMock(...args),
+}));
+
 import {
   reconcileKeywordIndex,
   searchKeywordIndex,
   extractText,
   trackTenantObjects,
+  submitVectorSync,
 } from "./kb-keyword-index";
 import DOMMatrixShim from "@thednp/dommatrix";
 import Database from "better-sqlite3";
@@ -92,6 +101,8 @@ function cleanupTempDb() {
 
 beforeEach(() => {
   sendMock.mockReset();
+  ingestMock.mockReset();
+  deleteMock.mockReset();
   process.env.BAWS_ACCESS_KEY_ID = "AKIA_TEST";
   process.env.BAWS_SECRET_ACCESS_KEY = "secret";
   cleanupTempDb();
@@ -853,5 +864,275 @@ describe("trackTenantObjects", () => {
     });
 
     expect(result.changedKeys).toEqual([`tenants/${TRACK_TENANT}/a.txt`]);
+  });
+});
+
+describe("submitVectorSync", () => {
+  const SYNC_TENANT = "test-tenant-vectorsync";
+  const SYNC_KB_ID = "test-kb-vectorsync";
+  const SYNC_BUCKET = "test-bucket-vectorsync";
+
+  function syncDbPath() {
+    return tempTrackingDbPathFor(SYNC_TENANT, SYNC_KB_ID);
+  }
+
+  beforeEach(() => {
+    if (fs.existsSync(syncDbPath())) fs.unlinkSync(syncDbPath());
+  });
+  afterEach(() => {
+    if (fs.existsSync(syncDbPath())) fs.unlinkSync(syncDbPath());
+  });
+
+  // Wires up a fresh (or seeded) SQLite tracking file as the GetObjectCommand
+  // response, and captures whatever gets uploaded so tests can inspect the
+  // resulting state (queue/pending rows) after a call.
+  function mockS3(seedDb?: Database.Database) {
+    let storedIndexBody: Buffer | null = seedDb ? fs.readFileSync(seedDb.name) : null;
+    sendMock.mockImplementation(async (command: any) => {
+      const type = command.__type;
+      if (type === "GetObjectCommand") {
+        if (!storedIndexBody) {
+          const err: any = new Error("NoSuchKey");
+          err.name = "NoSuchKey";
+          err.$metadata = { httpStatusCode: 404 };
+          throw err;
+        }
+        return { Body: storedIndexBody };
+      }
+      if (type === "PutObjectCommand") {
+        storedIndexBody = Buffer.from(command.input.Body);
+        return {};
+      }
+      throw new Error(`Unexpected S3 command: ${type}`);
+    });
+    return {
+      openUploaded: () => {
+        fs.writeFileSync(syncDbPath() + ".uploaded", storedIndexBody!);
+        return new Database(syncDbPath() + ".uploaded");
+      },
+    };
+  }
+
+  function ingestResultsFor(keys: string[]) {
+    return keys.map((key) => ({ key, status: "STARTING" }));
+  }
+
+  it("seeds the queue from the diff on a fresh incremental run and submits everything within budget", async () => {
+    mockS3();
+    ingestMock.mockImplementation(async (params: any) => ingestResultsFor(params.keys));
+    deleteMock.mockImplementation(async (params: any) => ingestResultsFor(params.keys));
+
+    const result = await submitVectorSync({
+      tenantId: SYNC_TENANT,
+      knowledgeBaseId: SYNC_KB_ID,
+      dataSourceId: "ds-1",
+      bucketName: SYNC_BUCKET,
+      mode: "incremental",
+      usesTrackingFile: true,
+      diff: {
+        listedKeys: [`tenants/${SYNC_TENANT}/a.pdf`, `tenants/${SYNC_TENANT}/b.pdf`],
+        changedKeys: [`tenants/${SYNC_TENANT}/a.pdf`, `tenants/${SYNC_TENANT}/b.pdf`],
+        deletedKeys: [`tenants/${SYNC_TENANT}/c.pdf`],
+      },
+    });
+
+    expect(ingestMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        keys: [`tenants/${SYNC_TENANT}/a.pdf`, `tenants/${SYNC_TENANT}/b.pdf`],
+      }),
+      expect.anything(),
+    );
+    expect(deleteMock).toHaveBeenCalledWith(
+      expect.objectContaining({ keys: [`tenants/${SYNC_TENANT}/c.pdf`] }),
+      expect.anything(),
+    );
+    expect(result.submittedCount).toBe(2);
+    expect(result.deletedCount).toBe(1);
+    expect(result.partial).toBe(false);
+  });
+
+  it("full mode ingests every listedKey, not just changedKeys", async () => {
+    mockS3();
+    ingestMock.mockImplementation(async (params: any) => ingestResultsFor(params.keys));
+    deleteMock.mockResolvedValue([]);
+
+    await submitVectorSync({
+      tenantId: SYNC_TENANT,
+      knowledgeBaseId: SYNC_KB_ID,
+      dataSourceId: "ds-1",
+      bucketName: SYNC_BUCKET,
+      mode: "full",
+      usesTrackingFile: true,
+      diff: {
+        listedKeys: [`tenants/${SYNC_TENANT}/a.pdf`, `tenants/${SYNC_TENANT}/b.pdf`],
+        changedKeys: [`tenants/${SYNC_TENANT}/b.pdf`],
+        deletedKeys: [],
+      },
+    });
+
+    expect(ingestMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        keys: [`tenants/${SYNC_TENANT}/a.pdf`, `tenants/${SYNC_TENANT}/b.pdf`],
+      }),
+      expect.anything(),
+    );
+  });
+
+  it("retries a key still marked pending from an earlier interrupted attempt, even though S3 hasn't changed it again", async () => {
+    // Simulate a prior run that queued this key for ingestion but never
+    // confirmed submission (crash, timeout, whatever) - vector_pending still
+    // has it, even though this fresh diff sees it as unchanged.
+    const seedDb = new Database(syncDbPath());
+    seedDb.exec(`
+      CREATE TABLE vector_pending (
+        tenant_id TEXT NOT NULL, knowledge_base_id TEXT NOT NULL, s3_key TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, knowledge_base_id, s3_key)
+      );
+    `);
+    seedDb
+      .prepare(`INSERT INTO vector_pending (tenant_id, knowledge_base_id, s3_key) VALUES (?, ?, ?)`)
+      .run(SYNC_TENANT, SYNC_KB_ID, `tenants/${SYNC_TENANT}/stale.pdf`);
+
+    mockS3(seedDb);
+    seedDb.close();
+    ingestMock.mockImplementation(async (params: any) => ingestResultsFor(params.keys));
+    deleteMock.mockResolvedValue([]);
+
+    await submitVectorSync({
+      tenantId: SYNC_TENANT,
+      knowledgeBaseId: SYNC_KB_ID,
+      dataSourceId: "ds-1",
+      bucketName: SYNC_BUCKET,
+      mode: "incremental",
+      usesTrackingFile: true,
+      diff: {
+        listedKeys: [`tenants/${SYNC_TENANT}/stale.pdf`],
+        changedKeys: [], // S3 says nothing changed
+        deletedKeys: [],
+      },
+    });
+
+    expect(ingestMock).toHaveBeenCalledWith(
+      expect.objectContaining({ keys: [`tenants/${SYNC_TENANT}/stale.pdf`] }),
+      expect.anything(),
+    );
+  });
+
+  it("does not re-ingest a pending key that's since been deleted from S3", async () => {
+    const seedDb = new Database(syncDbPath());
+    seedDb.exec(`
+      CREATE TABLE vector_pending (
+        tenant_id TEXT NOT NULL, knowledge_base_id TEXT NOT NULL, s3_key TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, knowledge_base_id, s3_key)
+      );
+    `);
+    seedDb
+      .prepare(`INSERT INTO vector_pending (tenant_id, knowledge_base_id, s3_key) VALUES (?, ?, ?)`)
+      .run(SYNC_TENANT, SYNC_KB_ID, `tenants/${SYNC_TENANT}/gone.pdf`);
+
+    mockS3(seedDb);
+    seedDb.close();
+    ingestMock.mockResolvedValue([]);
+    deleteMock.mockImplementation(async (params: any) => ingestResultsFor(params.keys));
+
+    await submitVectorSync({
+      tenantId: SYNC_TENANT,
+      knowledgeBaseId: SYNC_KB_ID,
+      dataSourceId: "ds-1",
+      bucketName: SYNC_BUCKET,
+      mode: "incremental",
+      usesTrackingFile: true,
+      diff: {
+        listedKeys: [], // no longer in S3
+        changedKeys: [],
+        deletedKeys: [`tenants/${SYNC_TENANT}/gone.pdf`],
+      },
+    });
+
+    expect(ingestMock).not.toHaveBeenCalled();
+    expect(deleteMock).toHaveBeenCalledWith(
+      expect.objectContaining({ keys: [`tenants/${SYNC_TENANT}/gone.pdf`] }),
+      expect.anything(),
+    );
+  });
+
+  it("checkpoints when not everything gets submitted, and a resume (no diff) continues without re-seeding", async () => {
+    mockS3();
+    // First round: only "a" gets submitted (simulates the real deadline-aware
+    // batching in bedrock-kb.ts returning fewer results than requested).
+    ingestMock.mockImplementationOnce(async () => [
+      { key: `tenants/${SYNC_TENANT}/a.pdf`, status: "STARTING" },
+    ]);
+    deleteMock.mockResolvedValue([]);
+
+    const first = await submitVectorSync({
+      tenantId: SYNC_TENANT,
+      knowledgeBaseId: SYNC_KB_ID,
+      dataSourceId: "ds-1",
+      bucketName: SYNC_BUCKET,
+      mode: "incremental",
+      usesTrackingFile: true,
+      diff: {
+        listedKeys: [`tenants/${SYNC_TENANT}/a.pdf`, `tenants/${SYNC_TENANT}/b.pdf`],
+        changedKeys: [`tenants/${SYNC_TENANT}/a.pdf`, `tenants/${SYNC_TENANT}/b.pdf`],
+        deletedKeys: [],
+      },
+    });
+
+    expect(first.partial).toBe(true);
+    expect(first.submittedCount).toBe(1);
+
+    // Resume: no diff passed at all - must continue draining the existing
+    // queue (just "b" left), not re-seed from a (missing) diff.
+    ingestMock.mockImplementationOnce(async (params: any) => ingestResultsFor(params.keys));
+    const second = await submitVectorSync({
+      tenantId: SYNC_TENANT,
+      knowledgeBaseId: SYNC_KB_ID,
+      dataSourceId: "ds-1",
+      bucketName: SYNC_BUCKET,
+      mode: "incremental",
+      usesTrackingFile: true,
+    });
+
+    expect(ingestMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ keys: [`tenants/${SYNC_TENANT}/b.pdf`] }),
+      expect.anything(),
+    );
+    expect(second.partial).toBe(false);
+  });
+
+  it("only clears vector_pending for keys that were actually confirmed submitted", async () => {
+    const s3 = mockS3();
+    // "a" succeeds, "b" doesn't come back in the results at all (as if that
+    // batch never got a chance to run before the deadline).
+    ingestMock.mockImplementationOnce(async () => [
+      { key: `tenants/${SYNC_TENANT}/a.pdf`, status: "STARTING" },
+    ]);
+    deleteMock.mockResolvedValue([]);
+
+    await submitVectorSync({
+      tenantId: SYNC_TENANT,
+      knowledgeBaseId: SYNC_KB_ID,
+      dataSourceId: "ds-1",
+      bucketName: SYNC_BUCKET,
+      mode: "incremental",
+      usesTrackingFile: true,
+      diff: {
+        listedKeys: [`tenants/${SYNC_TENANT}/a.pdf`, `tenants/${SYNC_TENANT}/b.pdf`],
+        changedKeys: [`tenants/${SYNC_TENANT}/a.pdf`, `tenants/${SYNC_TENANT}/b.pdf`],
+        deletedKeys: [],
+      },
+    });
+
+    const uploaded = s3.openUploaded();
+    const pendingKeys = (
+      uploaded
+        .prepare(`SELECT s3_key FROM vector_pending WHERE tenant_id = ?`)
+        .all(SYNC_TENANT) as Array<{ s3_key: string }>
+    ).map((row) => row.s3_key);
+    uploaded.close();
+    fs.unlinkSync(syncDbPath() + ".uploaded");
+
+    expect(pendingKeys).toEqual([`tenants/${SYNC_TENANT}/b.pdf`]);
   });
 });

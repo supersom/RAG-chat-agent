@@ -2,17 +2,14 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
 import { getTenant } from "@/app/lib/db/tenants";
-import {
-  getKbDataSource,
-  ingestKnowledgeBaseDocuments,
-  deleteKnowledgeBaseDocuments,
-} from "@/app/lib/bedrock-kb";
-import { reconcileKeywordIndex, trackTenantObjects } from "@/app/lib/kb-keyword-index";
+import { getKbDataSource } from "@/app/lib/bedrock-kb";
+import { reconcileKeywordIndex, trackTenantObjects, submitVectorSync } from "@/app/lib/kb-keyword-index";
 
 const syncRequestSchema = z
   .object({
     mode: z.enum(["full", "incremental"]).optional(),
     resumeKeywordIndexOnly: z.boolean().optional(),
+    resumeVectorSyncOnly: z.boolean().optional(),
   })
   .optional();
 
@@ -40,6 +37,7 @@ export async function POST(req: Request) {
   }
   const mode = parsed.data?.mode ?? "incremental";
   const resumeKeywordIndexOnly = parsed.data?.resumeKeywordIndexOnly === true;
+  const resumeVectorSyncOnly = parsed.data?.resumeVectorSyncOnly === true;
 
   const tenant = await getTenant(session.user.tenantId);
   if (!tenant) {
@@ -52,6 +50,30 @@ export async function POST(req: Request) {
       { error: "Could not resolve this tenant's knowledge base data source" },
       { status: 400 },
     );
+  }
+
+  let vectorSync: Awaited<ReturnType<typeof submitVectorSync>> | null = null;
+  let vectorSyncError: string | null = null;
+
+  // A vector-sync-only resume continues an in-progress checkpointed
+  // submission (see submitVectorSync's own vector_sync_run state) - it
+  // needs neither a fresh diff nor any keyword-index work this round.
+  if (resumeVectorSyncOnly) {
+    try {
+      vectorSync = await submitVectorSync({
+        tenantId: tenant.tenantId,
+        knowledgeBaseId: tenant.knowledgeBaseId,
+        dataSourceId: dataSource.dataSourceId,
+        bucketName: dataSource.bucketName,
+        region: tenant.awsRegion,
+        mode,
+        usesTrackingFile: Boolean(tenant.disableKeywordSearch),
+      });
+    } catch (err) {
+      console.error("Vector sync failed:", err);
+      vectorSyncError = err instanceof Error ? err.message : "Vector sync failed";
+    }
+    return NextResponse.json({ keywordIndex: null, keywordIndexError: null, vectorSync, vectorSyncError });
   }
 
   // The tenant-scoped S3 object diff, however it was computed, drives vector
@@ -94,44 +116,23 @@ export async function POST(req: Request) {
     }
   }
 
-  // Vector sync only ever runs off a freshly computed (non-partial) diff -
-  // resuming a checkpointed keyword-index pass doesn't recompute one, and
-  // acting on a partial listing risks missing deletions.
-  let vectorSync: {
-    mode: "full" | "incremental";
-    submittedCount: number;
-    deletedCount: number;
-    documents: { key: string; status?: string; statusReason?: string }[];
-  } | null = null;
-  let vectorSyncError: string | null = null;
-
+  // Vector sync only ever starts fresh off a freshly computed (non-partial)
+  // diff - resuming a checkpointed keyword-index pass doesn't recompute one,
+  // and acting on a partial listing risks missing deletions. (A separate
+  // resumeVectorSyncOnly request, handled above, continues vector sync's own
+  // checkpoint independently of the keyword-index resume loop.)
   if (!resumeKeywordIndexOnly && objectDiff && !objectDiff.partial) {
     try {
-      const keysToIngest = mode === "full" ? objectDiff.listedKeys : objectDiff.changedKeys;
-      // Sequential, not Promise.all: Bedrock enforces a single account-wide
-      // concurrency budget summed *across* Ingest and Delete calls together
-      // (live-confirmed: "sum of concurrent IngestKnowledgeBaseDocuments and
-      // DeleteKnowledgeBaseDocuments requests can't exceed (10)"). Running
-      // both at once risks summing past that even with each individually
-      // staying under it.
-      const ingestResults = await ingestKnowledgeBaseDocuments({
+      vectorSync = await submitVectorSync({
+        tenantId: tenant.tenantId,
         knowledgeBaseId: tenant.knowledgeBaseId,
         dataSourceId: dataSource.dataSourceId,
         bucketName: dataSource.bucketName,
-        keys: keysToIngest,
-      });
-      const deleteResults = await deleteKnowledgeBaseDocuments({
-        knowledgeBaseId: tenant.knowledgeBaseId,
-        dataSourceId: dataSource.dataSourceId,
-        bucketName: dataSource.bucketName,
-        keys: objectDiff.deletedKeys,
-      });
-      vectorSync = {
+        region: tenant.awsRegion,
         mode,
-        submittedCount: keysToIngest.length,
-        deletedCount: objectDiff.deletedKeys.length,
-        documents: [...ingestResults, ...deleteResults],
-      };
+        usesTrackingFile: Boolean(tenant.disableKeywordSearch),
+        diff: objectDiff,
+      });
     } catch (err) {
       console.error("Vector sync failed:", err);
       vectorSyncError = err instanceof Error ? err.message : "Vector sync failed";

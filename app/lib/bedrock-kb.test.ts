@@ -160,6 +160,82 @@ describe("ingestKnowledgeBaseDocuments", () => {
     delete process.env.KB_SYNC_BATCH_PACING_MS;
   });
 
+  it("stops picking up new batches once the deadline passes, but returns whatever completed", async () => {
+    // A large tenant needs more batches than the account-wide rate limit
+    // can clear inside one request - this is what lets a caller checkpoint:
+    // submit as many batches as fit in a time budget, see exactly which
+    // keys got processed via the returned results, and pick up the rest
+    // (never seen here) on the next round.
+    process.env.KB_SYNC_BATCH_CONCURRENCY = "1";
+    process.env.KB_SYNC_BATCH_PACING_MS = "0";
+    let callCount = 0;
+    let clock = 0;
+    const now = () => clock;
+
+    sendMock.mockImplementation(async (command: any) => {
+      callCount += 1;
+      clock += 10; // simulate each call taking some time
+      return {
+        documentDetails: command.input.documents.map((doc: any) => ({
+          identifier: { dataSourceType: "S3", s3: { uri: doc.content.s3.s3Location.uri } },
+          status: "STARTING",
+        })),
+      };
+    });
+
+    const keys = Array.from({ length: 50 }, (_, i) => `tenants/acme/file-${i}.pdf`); // 5 batches
+    const results = await ingestKnowledgeBaseDocuments(
+      { knowledgeBaseId: "kb-1", dataSourceId: "ds-1", bucketName: "pool-bucket", keys },
+      { deadline: 25, now },
+    );
+
+    expect(callCount).toBeLessThan(5);
+    expect(results.length).toBe(callCount * 10); // only actually-dispatched batches show up
+
+    delete process.env.KB_SYNC_BATCH_CONCURRENCY;
+    delete process.env.KB_SYNC_BATCH_PACING_MS;
+  });
+
+  it("isolates one batch's failure - other concurrent batches' results still come back", async () => {
+    // A single batch exhausting all retries (e.g. sustained throttling)
+    // must not discard results from every other batch's concurrent worker -
+    // Promise.all rejecting on one thrown worker would otherwise lose all of
+    // them, forcing an entire round to be redone instead of just the one
+    // batch that actually failed.
+    process.env.KB_SYNC_BATCH_CONCURRENCY = "3";
+    process.env.KB_SYNC_BATCH_PACING_MS = "0";
+
+    sendMock.mockImplementation(async (command: any) => {
+      const firstKey = command.input.documents[0].content.s3.s3Location.uri as string;
+      if (firstKey.includes("file-10")) {
+        throw new Error("ThrottlingException: exhausted retries");
+      }
+      return {
+        documentDetails: command.input.documents.map((doc: any) => ({
+          identifier: { dataSourceType: "S3", s3: { uri: doc.content.s3.s3Location.uri } },
+          status: "STARTING",
+        })),
+      };
+    });
+
+    const keys = Array.from({ length: 30 }, (_, i) => `tenants/acme/file-${i}.pdf`); // 3 batches
+    const results = await ingestKnowledgeBaseDocuments({
+      knowledgeBaseId: "kb-1",
+      dataSourceId: "ds-1",
+      bucketName: "pool-bucket",
+      keys,
+    });
+
+    // Batch 2 (keys 10-19) failed; batches 1 and 3 still succeeded.
+    expect(results.length).toBe(20);
+    expect(results.some((r) => r.key.includes("file-10"))).toBe(false);
+    expect(results.some((r) => r.key.includes("file-0"))).toBe(true);
+    expect(results.some((r) => r.key.includes("file-20"))).toBe(true);
+
+    delete process.env.KB_SYNC_BATCH_CONCURRENCY;
+    delete process.env.KB_SYNC_BATCH_PACING_MS;
+  });
+
   it("maps returned document details back to their S3 key", async () => {
     sendMock.mockResolvedValue({
       documentDetails: [detailFor("pool-bucket", "tenants/acme/a.pdf", "INDEXED")],

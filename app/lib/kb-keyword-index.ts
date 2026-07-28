@@ -12,6 +12,11 @@ import {
   PutObjectCommand,
 } from "@aws-sdk/client-s3";
 import type { RAGSource } from "@/app/lib/rag-types";
+import {
+  ingestKnowledgeBaseDocuments,
+  deleteKnowledgeBaseDocuments,
+  type DocumentSyncResult,
+} from "@/app/lib/bedrock-kb";
 
 const DEFAULT_REGION = "us-east-2";
 const DEFAULT_INDEX_PREFIX = ".customer-support-agent/keyword-indexes";
@@ -352,6 +357,31 @@ function initDatabase(dbPath: string): Database.Database {
       listing_partial INTEGER NOT NULL,
       errors TEXT NOT NULL
     );
+
+    -- A key sits here from the moment it's queued for vector ingestion until
+    -- actually submitted to Bedrock successfully - not just "seen in an S3
+    -- diff". This is what lets an incremental sync mean "still genuinely
+    -- unindexed", not just "changed since we last looked": if a submission
+    -- never completes (checkpoint boundary, error, tab closed), the key
+    -- stays pending and the next sync picks it back up, regardless of
+    -- whether S3's own metadata for it has changed again.
+    CREATE TABLE IF NOT EXISTS vector_pending (
+      tenant_id TEXT NOT NULL,
+      knowledge_base_id TEXT NOT NULL,
+      s3_key TEXT NOT NULL,
+      PRIMARY KEY (tenant_id, knowledge_base_id, s3_key)
+    );
+
+    CREATE TABLE IF NOT EXISTS vector_sync_queue (
+      s3_key TEXT NOT NULL,
+      action TEXT NOT NULL CHECK (action IN ('ingest', 'delete')),
+      PRIMARY KEY (s3_key, action)
+    );
+
+    CREATE TABLE IF NOT EXISTS vector_sync_run (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      mode TEXT NOT NULL
+    );
   `);
   return db;
 }
@@ -466,6 +496,90 @@ function removeFromQueue(db: Database.Database, key: string) {
 
 function clearQueue(db: Database.Database) {
   db.prepare(`DELETE FROM reconcile_queue`).run();
+}
+
+function readVectorPending(
+  db: Database.Database,
+  tenantId: string,
+  knowledgeBaseId: string,
+): Set<string> {
+  const rows = db
+    .prepare(`SELECT s3_key FROM vector_pending WHERE tenant_id = ? AND knowledge_base_id = ?`)
+    .all(tenantId, knowledgeBaseId) as Array<{ s3_key: string }>;
+  return new Set(rows.map((row) => row.s3_key));
+}
+
+function markVectorPending(
+  db: Database.Database,
+  tenantId: string,
+  knowledgeBaseId: string,
+  keys: string[],
+) {
+  const insert = db.prepare(
+    `INSERT OR IGNORE INTO vector_pending (tenant_id, knowledge_base_id, s3_key) VALUES (?, ?, ?)`,
+  );
+  const insertMany = db.transaction((items: string[]) => {
+    for (const key of items) insert.run(tenantId, knowledgeBaseId, key);
+  });
+  insertMany(keys);
+}
+
+function clearVectorPending(
+  db: Database.Database,
+  tenantId: string,
+  knowledgeBaseId: string,
+  key: string,
+) {
+  db.prepare(
+    `DELETE FROM vector_pending WHERE tenant_id = ? AND knowledge_base_id = ? AND s3_key = ?`,
+  ).run(tenantId, knowledgeBaseId, key);
+}
+
+type VectorSyncAction = "ingest" | "delete";
+type VectorSyncQueueItem = { key: string; action: VectorSyncAction };
+
+function enqueueVectorSync(db: Database.Database, items: VectorSyncQueueItem[]) {
+  const insert = db.prepare(
+    `INSERT OR IGNORE INTO vector_sync_queue (s3_key, action) VALUES (?, ?)`,
+  );
+  const insertMany = db.transaction((rows: VectorSyncQueueItem[]) => {
+    for (const row of rows) insert.run(row.key, row.action);
+  });
+  insertMany(items);
+}
+
+function readVectorSyncQueue(db: Database.Database): VectorSyncQueueItem[] {
+  const rows = db.prepare(`SELECT s3_key, action FROM vector_sync_queue`).all() as Array<{
+    s3_key: string;
+    action: VectorSyncAction;
+  }>;
+  return rows.map((row) => ({ key: row.s3_key, action: row.action }));
+}
+
+function removeFromVectorSyncQueue(db: Database.Database, key: string, action: VectorSyncAction) {
+  db.prepare(`DELETE FROM vector_sync_queue WHERE s3_key = ? AND action = ?`).run(key, action);
+}
+
+function clearVectorSyncQueue(db: Database.Database) {
+  db.prepare(`DELETE FROM vector_sync_queue`).run();
+}
+
+function readVectorSyncRun(db: Database.Database): { mode: "full" | "incremental" } | null {
+  const row = db.prepare(`SELECT mode FROM vector_sync_run WHERE id = 1`).get() as
+    | { mode: "full" | "incremental" }
+    | undefined;
+  return row ?? null;
+}
+
+function writeVectorSyncRun(db: Database.Database, mode: "full" | "incremental") {
+  db.prepare(
+    `INSERT INTO vector_sync_run (id, mode) VALUES (1, ?)
+     ON CONFLICT(id) DO UPDATE SET mode = excluded.mode`,
+  ).run(mode);
+}
+
+function clearVectorSyncRun(db: Database.Database) {
+  db.prepare(`DELETE FROM vector_sync_run WHERE id = 1`).run();
 }
 
 async function downloadExistingIndex({
@@ -997,6 +1111,164 @@ export async function trackTenantObjects({
     deletedKeys: diff.partial ? [] : diff.deletedKeys,
     partial: diff.partial,
   };
+}
+
+// AWS's real, documented, account-wide limit for these APIs (5 requests/sec)
+// means a large tenant simply cannot have all its documents submitted
+// within one HTTP request - live math: ~1,833 files needs ~184 batches,
+// and even at the theoretical maximum rate that's ~37s, already past
+// Amplify's ~28s wall before any real latency. This budget leaves margin
+// for that, checkpointing the rest for the next round exactly like
+// reconcileKeywordIndex already does for its own per-object loop.
+const DEFAULT_VECTOR_SYNC_TIME_BUDGET_MS = 15_000;
+
+export type VectorSyncResult = {
+  submittedCount: number;
+  deletedCount: number;
+  documents: DocumentSyncResult[];
+  partial: boolean;
+};
+
+// Checkpointed submission of a tenant's vector-sync workload (ingest +
+// delete) to Bedrock. Reuses whichever file reconcileKeywordIndex or
+// trackTenantObjects already uses for this tenant (selected via
+// `usesTrackingFile`, matching the tenant's disableKeywordSearch setting) -
+// same file, a few more tables, no extra S3 round-trip beyond what those
+// functions already do.
+//
+// On a fresh call (resumeOnly: false, no in-progress vector_sync_run), the
+// ingest set is:
+//   - full mode: every listedKey, unconditionally (drift correction).
+//   - incremental mode: changedKeys (new/S3-changed) UNION any key still
+//     sitting in vector_pending from an earlier interrupted attempt that
+//     still exists in S3 - i.e. genuinely "uploaded but not yet indexed",
+//     not just "changed since we last looked". A key only leaves
+//     vector_pending once actually submitted successfully, not merely seen.
+export async function submitVectorSync({
+  tenantId,
+  knowledgeBaseId,
+  dataSourceId,
+  bucketName,
+  credentials,
+  region,
+  mode,
+  usesTrackingFile,
+  diff,
+  timeBudgetMs,
+  now = Date.now,
+}: {
+  tenantId: string;
+  knowledgeBaseId: string;
+  dataSourceId: string;
+  bucketName: string;
+  credentials?: AwsCredentials;
+  region?: string;
+  mode: "full" | "incremental";
+  usesTrackingFile: boolean;
+  // Only needed to seed a fresh run - omit when resuming an in-progress one
+  // (self-determined from vector_sync_run, matching how reconcileKeywordIndex
+  // resumes purely off its own reconcile_run state). If omitted while there
+  // is no in-progress run, there's nothing to seed and this is a no-op.
+  diff?: { listedKeys: string[]; changedKeys: string[]; deletedKeys: string[] };
+  timeBudgetMs?: number;
+  now?: () => number;
+}): Promise<VectorSyncResult> {
+  const location = usesTrackingFile
+    ? trackingLocation(tenantId, knowledgeBaseId, bucketName)
+    : keywordIndexLocation(tenantId, knowledgeBaseId, bucketName);
+  const client = s3Client(region, credentials);
+  const dbPath = usesTrackingFile
+    ? tempTrackingPath(tenantId, knowledgeBaseId)
+    : tempIndexPath(tenantId, knowledgeBaseId);
+  await downloadExistingIndex({
+    client,
+    indexBucket: location.indexBucket,
+    indexKey: location.indexKey,
+    dbPath,
+  });
+
+  const db = initDatabase(dbPath);
+  const budgetMs =
+    timeBudgetMs ?? Number(process.env.VECTOR_SYNC_TIME_BUDGET_MS || DEFAULT_VECTOR_SYNC_TIME_BUDGET_MS);
+  const deadline = now() + budgetMs;
+
+  const documents: DocumentSyncResult[] = [];
+  let submittedCount = 0;
+  let deletedCount = 0;
+  let partial: boolean;
+
+  try {
+    if (!readVectorSyncRun(db)) {
+      const pendingKeys = readVectorPending(db, tenantId, knowledgeBaseId);
+      const listedSet = new Set(diff?.listedKeys ?? []);
+      const ingestKeys =
+        mode === "full"
+          ? (diff?.listedKeys ?? [])
+          : Array.from(
+              new Set([
+                ...(diff?.changedKeys ?? []),
+                ...Array.from(pendingKeys).filter((key) => listedSet.has(key)),
+              ]),
+            );
+      const deleteKeys = diff?.deletedKeys ?? [];
+
+      clearVectorSyncQueue(db);
+      enqueueVectorSync(db, [
+        ...ingestKeys.map((key) => ({ key, action: "ingest" as const })),
+        ...deleteKeys.map((key) => ({ key, action: "delete" as const })),
+      ]);
+      markVectorPending(db, tenantId, knowledgeBaseId, ingestKeys);
+      writeVectorSyncRun(db, mode);
+    }
+
+    const queued = readVectorSyncQueue(db);
+    const ingestBatch = queued.filter((item) => item.action === "ingest").map((item) => item.key);
+    const deleteBatch = queued.filter((item) => item.action === "delete").map((item) => item.key);
+
+    if (ingestBatch.length > 0 && now() < deadline) {
+      const results = await ingestKnowledgeBaseDocuments(
+        { knowledgeBaseId, dataSourceId, bucketName, keys: ingestBatch },
+        { deadline, now },
+      );
+      for (const result of results) {
+        removeFromVectorSyncQueue(db, result.key, "ingest");
+        clearVectorPending(db, tenantId, knowledgeBaseId, result.key);
+        documents.push(result);
+      }
+      submittedCount += results.length;
+    }
+
+    if (deleteBatch.length > 0 && now() < deadline) {
+      const results = await deleteKnowledgeBaseDocuments(
+        { knowledgeBaseId, dataSourceId, bucketName, keys: deleteBatch },
+        { deadline, now },
+      );
+      for (const result of results) {
+        removeFromVectorSyncQueue(db, result.key, "delete");
+        documents.push(result);
+      }
+      deletedCount += results.length;
+    }
+
+    const remaining = readVectorSyncQueue(db).length;
+    partial = remaining > 0;
+    if (!partial) clearVectorSyncRun(db);
+
+    db.pragma("optimize");
+  } finally {
+    db.close();
+  }
+
+  await client.send(
+    new PutObjectCommand({
+      Bucket: location.indexBucket,
+      Key: location.indexKey,
+      Body: fs.readFileSync(dbPath),
+      ContentType: "application/vnd.sqlite3",
+    }),
+  );
+
+  return { submittedCount, deletedCount, documents, partial };
 }
 
 export async function searchKeywordIndex({
