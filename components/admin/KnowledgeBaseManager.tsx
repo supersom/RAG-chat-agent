@@ -10,14 +10,19 @@ import {
   CardContent,
 } from "@/components/ui/card";
 
-type IngestionStatus = {
+type SyncMode = "full" | "incremental";
+
+type DocumentSyncStatus = {
+  key: string;
   status?: string;
-  statistics?: {
-    numberOfDocumentsScanned?: number;
-    numberOfNewDocumentsIndexed?: number;
-    numberOfModifiedDocumentsIndexed?: number;
-    numberOfDocumentsFailed?: number;
-  };
+  statusReason?: string;
+};
+
+type VectorSyncStatus = {
+  mode: SyncMode;
+  submittedCount: number;
+  deletedCount: number;
+  documents: DocumentSyncStatus[];
 };
 
 type KeywordIndexStatus = {
@@ -34,7 +39,18 @@ type KeywordIndexStatus = {
   errors: string[];
 };
 
-const TERMINAL_STATUSES = new Set(["COMPLETE", "FAILED"]);
+// Bedrock's per-document ingestion/deletion statuses that won't change on
+// their own without another sync - anything else (STARTING, PENDING,
+// IN_PROGRESS, DELETING, DELETE_IN_PROGRESS) is still in flight.
+const TERMINAL_DOCUMENT_STATUSES = new Set([
+  "INDEXED",
+  "PARTIALLY_INDEXED",
+  "FAILED",
+  "NOT_FOUND",
+  "IGNORED",
+  "METADATA_PARTIALLY_INDEXED",
+  "METADATA_UPDATE_FAILED",
+]);
 const POLL_INTERVAL_MS = 5000;
 
 type UploadableFile = File & { webkitRelativePath?: string };
@@ -49,8 +65,9 @@ export default function KnowledgeBaseManager() {
   const [uploadProgress, setUploadProgress] = useState<string | null>(null);
   const [isShared, setIsShared] = useState(false);
 
-  const [jobId, setJobId] = useState<string | null>(null);
-  const [ingestion, setIngestion] = useState<IngestionStatus | null>(null);
+  const [vectorSync, setVectorSync] = useState<VectorSyncStatus | null>(null);
+  const [vectorSyncError, setVectorSyncError] = useState<string | null>(null);
+  const [isVectorSyncPolling, setIsVectorSyncPolling] = useState(false);
   const [keywordIndex, setKeywordIndex] = useState<KeywordIndexStatus | null>(null);
   const [keywordIndexError, setKeywordIndexError] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -147,31 +164,44 @@ export default function KnowledgeBaseManager() {
     }
   }
 
-  async function pollIngestion(id: string) {
-    const res = await fetch(`/api/admin/kb/sync?jobId=${encodeURIComponent(id)}`);
-    if (!res.ok) return;
-    const data: IngestionStatus = await res.json();
-    setIngestion(data);
+  async function pollDocumentStatuses(keys: string[]) {
+    if (keys.length === 0) {
+      setIsVectorSyncPolling(false);
+      return;
+    }
 
-    if (data.status && !TERMINAL_STATUSES.has(data.status)) {
-      setTimeout(() => pollIngestion(id), POLL_INTERVAL_MS);
+    const res = await fetch(`/api/admin/kb/sync?keys=${encodeURIComponent(keys.join(","))}`);
+    if (!res.ok) {
+      setIsVectorSyncPolling(false);
+      return;
+    }
+
+    const { documents } = (await res.json()) as { documents: DocumentSyncStatus[] };
+    setVectorSync((current) => (current ? { ...current, documents } : current));
+
+    const stillPending = documents.some(
+      (doc) => !doc.status || !TERMINAL_DOCUMENT_STATUSES.has(doc.status),
+    );
+    if (stillPending) {
+      setTimeout(() => pollDocumentStatuses(keys), POLL_INTERVAL_MS);
     } else {
-      setIsSyncing(false);
+      setIsVectorSyncPolling(false);
     }
   }
 
   // The keyword-index reconcile is time-budgeted server-side and reports
   // `partial: true` when it had to checkpoint instead of finishing. Keep
-  // resuming it (without restarting the Bedrock ingestion job) until it
-  // reports a full pass, so a large knowledge base's first sync completes
-  // as several small requests instead of timing out as one big one.
-  async function runKeywordIndexSync(resumeOnly: boolean) {
+  // resuming it until it reports a full pass, so a large knowledge base's
+  // first sync completes as several small requests instead of timing out as
+  // one big one. Vector sync (tenant-scoped IngestKnowledgeBaseDocuments)
+  // only ever fires on the initial, non-resume request - see the route.
+  async function runSync(mode: SyncMode, resumeOnly: boolean) {
     setIsKeywordIndexSyncing(true);
     try {
       const res = await fetch("/api/admin/kb/sync", {
         method: "POST",
-        headers: resumeOnly ? { "Content-Type": "application/json" } : undefined,
-        body: resumeOnly ? JSON.stringify({ resumeKeywordIndexOnly: true }) : undefined,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(resumeOnly ? { resumeKeywordIndexOnly: true } : { mode }),
       });
 
       if (!res.ok) {
@@ -183,34 +213,49 @@ export default function KnowledgeBaseManager() {
       }
 
       const {
-        jobId: newJobId,
         keywordIndex: newKeywordIndex,
         keywordIndexError: newKeywordIndexError,
+        vectorSync: newVectorSync,
+        vectorSyncError: newVectorSyncError,
       } = await res.json();
       setKeywordIndex(newKeywordIndex ?? null);
       setKeywordIndexError(newKeywordIndexError ?? null);
 
       if (!resumeOnly) {
-        setJobId(newJobId);
-        pollIngestion(newJobId);
+        setVectorSync(newVectorSync ?? null);
+        setVectorSyncError(newVectorSyncError ?? null);
+        const keys: string[] = newVectorSync?.documents?.map((doc: DocumentSyncStatus) => doc.key) ?? [];
+        if (keys.length > 0) {
+          setIsVectorSyncPolling(true);
+          pollDocumentStatuses(keys);
+        }
       }
 
       if (newKeywordIndex?.partial && newKeywordIndex.mode === "reconcile" && !newKeywordIndexError) {
-        await runKeywordIndexSync(true);
+        await runSync(mode, true);
       }
     } finally {
       setIsKeywordIndexSyncing(false);
     }
   }
 
-  async function handleSync() {
+  async function handleSync(mode: SyncMode) {
     setSyncError(null);
-    setIngestion(null);
+    setVectorSync(null);
+    setVectorSyncError(null);
     setKeywordIndex(null);
     setKeywordIndexError(null);
     setIsSyncing(true);
-    await runKeywordIndexSync(false);
+    try {
+      await runSync(mode, false);
+    } finally {
+      setIsSyncing(false);
+    }
   }
+
+  const syncing = isSyncing || isKeywordIndexSyncing || isVectorSyncPolling;
+  const failedDocumentCount =
+    vectorSync?.documents.filter((doc) => doc.status === "FAILED").length ?? 0;
 
   return (
     <div className="flex flex-col gap-6">
@@ -271,18 +316,31 @@ export default function KnowledgeBaseManager() {
           <CardTitle>Sync knowledge base</CardTitle>
           <CardDescription>
             Newly uploaded documents aren&apos;t searchable until a sync
-            completes. This rescans the entire knowledge base, so it can take
-            a while if it holds a large number of existing documents.
+            completes. Both options only ever touch your organization&apos;s
+            own documents. &quot;Sync uploaded docs&quot; is the fast path -
+            it only indexes what&apos;s new, changed, or removed since the
+            last sync. &quot;Full sync&quot; re-indexes every document you
+            have, useful if something looks out of date.
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
-          <Button
-            onClick={handleSync}
-            disabled={isSyncing || isKeywordIndexSyncing}
-            className="w-fit"
-          >
-            {isSyncing || isKeywordIndexSyncing ? "Syncing..." : "Sync Knowledge Base"}
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              onClick={() => handleSync("incremental")}
+              disabled={syncing}
+              className="w-fit"
+            >
+              {syncing ? "Syncing..." : "Sync uploaded docs"}
+            </Button>
+            <Button
+              onClick={() => handleSync("full")}
+              disabled={syncing}
+              variant="outline"
+              className="w-fit"
+            >
+              {syncing ? "Syncing..." : "Full sync"}
+            </Button>
+          </div>
           {syncError && <p className="text-sm text-destructive">{syncError}</p>}
           {keywordIndex && (
             <div className="text-sm text-muted-foreground">
@@ -316,24 +374,32 @@ export default function KnowledgeBaseManager() {
               Keyword index update failed: {keywordIndexError}
             </p>
           )}
-          {jobId && ingestion && (
+          {vectorSync && (
             <div className="text-sm text-muted-foreground">
               <p>
-                Status: <span className="font-medium">{ingestion.status}</span>
+                Vector index ({vectorSync.mode}): submitted{" "}
+                {vectorSync.submittedCount}, deleted {vectorSync.deletedCount}
+                {failedDocumentCount > 0 && `, ${failedDocumentCount} failed`}
+                {isVectorSyncPolling ? " - indexing..." : "."}
               </p>
-              {ingestion.statistics && (
-                <p>
-                  Scanned {ingestion.statistics.numberOfDocumentsScanned ?? 0},
-                  indexed {ingestion.statistics.numberOfNewDocumentsIndexed ?? 0}
-                  {(ingestion.statistics.numberOfModifiedDocumentsIndexed ?? 0) >
-                    0 &&
-                    `, modified ${ingestion.statistics.numberOfModifiedDocumentsIndexed}`}
-                  {(ingestion.statistics.numberOfDocumentsFailed ?? 0) > 0 &&
-                    `, ${ingestion.statistics.numberOfDocumentsFailed} failed`}
-                  .
-                </p>
+              {failedDocumentCount > 0 && (
+                <ul className="mt-2 max-h-24 list-disc overflow-y-auto pl-5 font-mono text-xs text-destructive">
+                  {vectorSync.documents
+                    .filter((doc) => doc.status === "FAILED")
+                    .map((doc) => (
+                      <li key={doc.key}>
+                        {doc.key}
+                        {doc.statusReason ? `: ${doc.statusReason}` : ""}
+                      </li>
+                    ))}
+                </ul>
               )}
             </div>
+          )}
+          {vectorSyncError && (
+            <p className="text-sm text-destructive">
+              Vector index update failed: {vectorSyncError}
+            </p>
           )}
         </CardContent>
       </Card>

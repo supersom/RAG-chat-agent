@@ -21,7 +21,12 @@ vi.mock("@aws-sdk/client-s3", () => ({
   }),
 }));
 
-import { reconcileKeywordIndex, searchKeywordIndex, extractText } from "./kb-keyword-index";
+import {
+  reconcileKeywordIndex,
+  searchKeywordIndex,
+  extractText,
+  trackTenantObjects,
+} from "./kb-keyword-index";
 import DOMMatrixShim from "@thednp/dommatrix";
 import Database from "better-sqlite3";
 
@@ -607,5 +612,180 @@ describe("keyword index on a legacy (non-namespaced) bucket", () => {
     });
 
     expect(hits.length).toBe(2);
+  });
+});
+
+describe("reconcileKeywordIndex object diff (for vector-sync reuse)", () => {
+  const DIFF_TENANT = "test-tenant-diff";
+  const DIFF_KB_ID = "test-kb-diff";
+  const DIFF_BUCKET = "test-bucket-diff";
+
+  function diffDbPath() {
+    return tempDbPathFor(DIFF_TENANT, DIFF_KB_ID);
+  }
+
+  beforeEach(() => {
+    if (fs.existsSync(diffDbPath())) fs.unlinkSync(diffDbPath());
+  });
+  afterEach(() => {
+    if (fs.existsSync(diffDbPath())) fs.unlinkSync(diffDbPath());
+  });
+
+  it("returns the listed/changed/deleted key lists on a fresh run, empty on a resumed run", async () => {
+    let storedIndexBody: Buffer | null = null;
+    const s3Objects = [
+      {
+        Key: `tenants/${DIFF_TENANT}/a.txt`,
+        ETag: '"etag-a"',
+        Size: 10,
+        LastModified: new Date("2026-01-01T00:00:00Z"),
+      },
+      {
+        Key: `tenants/${DIFF_TENANT}/b.txt`,
+        ETag: '"etag-b"',
+        Size: 10,
+        LastModified: new Date("2026-01-01T00:00:00Z"),
+      },
+    ];
+
+    sendMock.mockImplementation(async (command: any) => {
+      const type = command.__type;
+      if (type === "GetObjectCommand") {
+        const key = command.input.Key as string;
+        if (key.endsWith(".sqlite")) {
+          if (!storedIndexBody) {
+            const err: any = new Error("NoSuchKey");
+            err.name = "NoSuchKey";
+            err.$metadata = { httpStatusCode: 404 };
+            throw err;
+          }
+          return { Body: storedIndexBody };
+        }
+        return { Body: Buffer.from("content", "utf8") };
+      }
+      if (type === "ListObjectsV2Command") {
+        return { Contents: s3Objects, IsTruncated: false };
+      }
+      if (type === "PutObjectCommand") {
+        storedIndexBody = Buffer.from(command.input.Body);
+        return {};
+      }
+      throw new Error(`Unexpected command: ${type}`);
+    });
+
+    // Round 1: zero time budget - fresh run computes and returns the diff,
+    // then checkpoints before processing any object.
+    const result1 = await reconcileKeywordIndex({
+      tenantId: DIFF_TENANT,
+      knowledgeBaseId: DIFF_KB_ID,
+      bucketName: DIFF_BUCKET,
+      timeBudgetMs: 0,
+      now: () => 1_000_000,
+    });
+
+    expect(result1.partial).toBe(true);
+    expect(result1.listedKeys.sort()).toEqual(
+      [`tenants/${DIFF_TENANT}/a.txt`, `tenants/${DIFF_TENANT}/b.txt`].sort(),
+    );
+    expect(result1.changedKeys.sort()).toEqual(result1.listedKeys.sort());
+    expect(result1.deletedKeys).toEqual([]);
+
+    // Round 2: resumes from checkpoint - diff was already computed in round
+    // 1 and isn't recomputed, so these come back empty rather than stale.
+    const result2 = await reconcileKeywordIndex({
+      tenantId: DIFF_TENANT,
+      knowledgeBaseId: DIFF_KB_ID,
+      bucketName: DIFF_BUCKET,
+      timeBudgetMs: 60_000,
+      now: () => 1_000_000,
+    });
+
+    expect(result2.partial).toBe(false);
+    expect(result2.listedKeys).toEqual([]);
+    expect(result2.changedKeys).toEqual([]);
+    expect(result2.deletedKeys).toEqual([]);
+  });
+});
+
+describe("trackTenantObjects", () => {
+  const TRACK_TENANT = "test-tenant-track";
+  const TRACK_KB_ID = "test-kb-track";
+  const TRACK_BUCKET = "test-bucket-track";
+
+  function trackDbPath() {
+    return tempDbPathFor(TRACK_TENANT, TRACK_KB_ID);
+  }
+
+  beforeEach(() => {
+    if (fs.existsSync(trackDbPath())) fs.unlinkSync(trackDbPath());
+  });
+  afterEach(() => {
+    if (fs.existsSync(trackDbPath())) fs.unlinkSync(trackDbPath());
+  });
+
+  it("records tracking rows without downloading file content, and reports the object as unchanged next time", async () => {
+    let storedIndexBody: Buffer | null = null;
+    let objects = [
+      {
+        Key: `tenants/${TRACK_TENANT}/a.txt`,
+        ETag: '"etag-a"',
+        Size: 10,
+        LastModified: new Date("2026-01-01T00:00:00Z"),
+      },
+    ];
+
+    sendMock.mockImplementation(async (command: any) => {
+      const type = command.__type;
+      if (type === "GetObjectCommand") {
+        const key = command.input.Key as string;
+        if (key.endsWith(".sqlite")) {
+          if (!storedIndexBody) {
+            const err: any = new Error("NoSuchKey");
+            err.name = "NoSuchKey";
+            err.$metadata = { httpStatusCode: 404 };
+            throw err;
+          }
+          return { Body: storedIndexBody };
+        }
+        throw new Error(`trackTenantObjects should never download file content: ${key}`);
+      }
+      if (type === "ListObjectsV2Command") {
+        return { Contents: objects, IsTruncated: false };
+      }
+      if (type === "PutObjectCommand") {
+        storedIndexBody = Buffer.from(command.input.Body);
+        return {};
+      }
+      throw new Error(`Unexpected command: ${type}`);
+    });
+
+    const first = await trackTenantObjects({
+      tenantId: TRACK_TENANT,
+      knowledgeBaseId: TRACK_KB_ID,
+      bucketName: TRACK_BUCKET,
+    });
+
+    expect(first.listedKeys).toEqual([`tenants/${TRACK_TENANT}/a.txt`]);
+    expect(first.changedKeys).toEqual([`tenants/${TRACK_TENANT}/a.txt`]);
+    expect(first.deletedKeys).toEqual([]);
+
+    const second = await trackTenantObjects({
+      tenantId: TRACK_TENANT,
+      knowledgeBaseId: TRACK_KB_ID,
+      bucketName: TRACK_BUCKET,
+    });
+
+    expect(second.changedKeys).toEqual([]);
+    expect(second.deletedKeys).toEqual([]);
+
+    // Object removed from S3 - should now be reported as deleted.
+    objects = [];
+    const third = await trackTenantObjects({
+      tenantId: TRACK_TENANT,
+      knowledgeBaseId: TRACK_KB_ID,
+      bucketName: TRACK_BUCKET,
+    });
+
+    expect(third.deletedKeys).toEqual([`tenants/${TRACK_TENANT}/a.txt`]);
   });
 });

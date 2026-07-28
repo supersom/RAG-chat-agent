@@ -61,6 +61,29 @@ export type KeywordIndexUpdateResult = {
   errorCount: number;
   partial: boolean;
   errors: string[];
+  // The tenant-scoped S3 object diff computed by this run, reused by the
+  // vector-sync side (see app/api/admin/kb/sync/route.ts) so it never needs
+  // its own separate listing/change-detection pass. Only populated on a
+  // fresh (non-resumed) run - a resumed run continues an already-computed
+  // diff rather than recomputing one, so these come back empty.
+  listedKeys: string[];
+  changedKeys: string[];
+  deletedKeys: string[];
+};
+
+// The tenant-scoped diff between what's currently in S3 and what this
+// tenant's tracking store (the `documents` table) last saw. Shared by
+// reconcileKeywordIndex (which also builds the FTS chunks) and
+// trackTenantObjects (which only needs the diff, for tenants with keyword
+// search disabled) so there is exactly one place that computes it.
+type TenantObjectDiff = {
+  listedObjectCount: number;
+  listedKeys: string[];
+  changed: S3InventoryObject[];
+  changedKeys: string[];
+  unchangedObjectCount: number;
+  deletedKeys: string[];
+  partial: boolean;
 };
 
 type KeywordSearchParams = {
@@ -543,6 +566,44 @@ function hasObjectChanged(object: S3InventoryObject, existing?: ExistingDocument
   );
 }
 
+async function diffTenantObjects(
+  db: Database.Database,
+  params: { client: S3Client; bucketName: string; tenantId: string; knowledgeBaseId: string },
+): Promise<TenantObjectDiff> {
+  const { objects, partial } = await listSupportedObjects({
+    client: params.client,
+    bucketName: params.bucketName,
+    tenantId: params.tenantId,
+  });
+  const existing = existingDocuments(db, {
+    tenantId: params.tenantId,
+    knowledgeBaseId: params.knowledgeBaseId,
+    bucketName: params.bucketName,
+  });
+  const s3Keys = new Set(objects.map((object) => object.key));
+  const deletedKeys = Array.from(existing.keys()).filter((key) => !s3Keys.has(key));
+
+  const changed: S3InventoryObject[] = [];
+  let unchangedObjectCount = 0;
+  for (const object of objects) {
+    if (!hasObjectChanged(object, existing.get(object.key))) {
+      unchangedObjectCount += 1;
+      continue;
+    }
+    changed.push(object);
+  }
+
+  return {
+    listedObjectCount: objects.length,
+    listedKeys: objects.map((object) => object.key),
+    changed,
+    changedKeys: changed.map((object) => object.key),
+    unchangedObjectCount,
+    deletedKeys,
+    partial,
+  };
+}
+
 function deleteObjectRows(
   db: Database.Database,
   params: { tenantId: string; knowledgeBaseId: string; bucketName: string; key: string },
@@ -703,6 +764,10 @@ export async function reconcileKeywordIndex({
 
   let run: ReconcileRunState;
   let partial: boolean;
+  // Only populated on a fresh (non-resumed) run - see KeywordIndexUpdateResult.
+  let listedKeys: string[] = [];
+  let changedKeys: string[] = [];
+  let deletedKeys: string[] = [];
 
   try {
     const resumed = readReconcileRun(db);
@@ -713,47 +778,28 @@ export async function reconcileKeywordIndex({
       // Fresh run: list the bucket once, decide what changed, and run the
       // stale-object deletion sweep - all of this depends on having the full
       // current listing, so none of it is repeated on a resumed invocation.
-      const { objects, partial: listingPartial } = await listSupportedObjects({
-        client,
-        bucketName,
-        tenantId,
-      });
-      const existing = existingDocuments(db, { tenantId, knowledgeBaseId, bucketName });
-      const s3Keys = new Set(objects.map((object) => object.key));
+      const diff = await diffTenantObjects(db, { client, bucketName, tenantId, knowledgeBaseId });
 
-      let deletedObjectCount = 0;
-      if (!listingPartial) {
-        for (const key of Array.from(existing.keys())) {
-          if (!s3Keys.has(key)) {
-            deleteOne(key);
-            deletedObjectCount += 1;
-          }
-        }
-      }
-
-      const toEnqueue: S3InventoryObject[] = [];
-      let unchangedObjectCount = 0;
-      for (const object of objects) {
-        const previous = existing.get(object.key);
-        if (!hasObjectChanged(object, previous)) {
-          unchangedObjectCount += 1;
-          continue;
-        }
-        toEnqueue.push(object);
+      if (!diff.partial) {
+        for (const key of diff.deletedKeys) deleteOne(key);
       }
 
       clearQueue(db);
-      enqueueObjects(db, toEnqueue);
+      enqueueObjects(db, diff.changed);
+
+      listedKeys = diff.listedKeys;
+      changedKeys = diff.changedKeys;
+      deletedKeys = diff.partial ? [] : diff.deletedKeys;
 
       run = {
-        listedObjectCount: objects.length,
-        changedObjectCount: toEnqueue.length,
-        unchangedObjectCount,
-        deletedObjectCount,
+        listedObjectCount: diff.listedObjectCount,
+        changedObjectCount: diff.changedKeys.length,
+        unchangedObjectCount: diff.unchangedObjectCount,
+        deletedObjectCount: deletedKeys.length,
         indexedObjectCount: 0,
         indexedChunkCount: 0,
         skippedObjectCount: 0,
-        listingPartial,
+        listingPartial: diff.partial,
         errors: [],
       };
     }
@@ -836,6 +882,88 @@ export async function reconcileKeywordIndex({
     errorCount: run.errors.length,
     partial,
     errors: run.errors,
+    listedKeys,
+    changedKeys,
+    deletedKeys,
+  };
+}
+
+// The tenant-scoped equivalent of reconcileKeywordIndex for tenants with
+// keyword search disabled: computes and records the same S3 object diff
+// (so future syncs' change-detection stays correct and vector-sync always
+// has a diff to work from, regardless of the keyword-search toggle) but
+// skips downloading, extracting, and chunking file content entirely - there
+// is no FTS index to build. Cheap enough (S3 listing + lightweight SQLite
+// row writes) that it doesn't need the time-budget/checkpoint machinery
+// reconcileKeywordIndex needs for its much more expensive per-object work.
+export async function trackTenantObjects({
+  tenantId,
+  knowledgeBaseId,
+  bucketName,
+  credentials,
+  region,
+}: KeywordIndexParams): Promise<{
+  listedObjectCount: number;
+  listedKeys: string[];
+  changedKeys: string[];
+  deletedKeys: string[];
+  partial: boolean;
+}> {
+  const { indexBucket, indexKey } = keywordIndexLocation(tenantId, knowledgeBaseId, bucketName);
+  const client = s3Client(region, credentials);
+  const dbPath = tempIndexPath(tenantId, knowledgeBaseId);
+  await downloadExistingIndex({ client, indexBucket, indexKey, dbPath });
+
+  const db = initDatabase(dbPath);
+  let diff: TenantObjectDiff;
+
+  try {
+    diff = await diffTenantObjects(db, { client, bucketName, tenantId, knowledgeBaseId });
+
+    if (!diff.partial) {
+      const recordTracking = db.transaction((objects: S3InventoryObject[]) => {
+        for (const object of objects) {
+          deleteObjectRows(db, { tenantId, knowledgeBaseId, bucketName, key: object.key });
+          insertObjectRows({
+            db,
+            tenantId,
+            knowledgeBaseId,
+            bucketName,
+            key: object.key,
+            etag: object.etag,
+            size: object.size,
+            lastModified: object.lastModified,
+            chunks: [],
+          });
+        }
+      });
+      recordTracking(diff.changed);
+
+      for (const key of diff.deletedKeys) {
+        deleteObjectRows(db, { tenantId, knowledgeBaseId, bucketName, key });
+      }
+    }
+
+    db.pragma("optimize");
+  } finally {
+    db.close();
+  }
+
+  await client.send(
+    new PutObjectCommand({
+      Bucket: indexBucket,
+      Key: indexKey,
+      Body: fs.readFileSync(dbPath),
+      ContentType: "application/vnd.sqlite3",
+    }),
+  );
+
+  return {
+    listedObjectCount: diff.listedObjectCount,
+    listedKeys: diff.listedKeys,
+    changedKeys: diff.changedKeys,
+    deletedKeys: diff.partial ? [] : diff.deletedKeys,
+    partial: diff.partial,
   };
 }
 
