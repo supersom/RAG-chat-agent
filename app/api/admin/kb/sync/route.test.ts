@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("@/auth", () => ({
   auth: vi.fn(),
@@ -16,6 +16,7 @@ vi.mock("@/app/lib/kb-keyword-index", () => ({
   reconcileKeywordIndex: vi.fn(),
   trackTenantObjects: vi.fn(),
   submitVectorSync: vi.fn(),
+  DEFAULT_VECTOR_SYNC_TIME_BUDGET_MS: 15_000,
 }));
 
 import { auth } from "@/auth";
@@ -187,5 +188,62 @@ describe("POST /api/admin/kb/sync", () => {
 
     expect(res.status).toBe(401);
     expect(mockedSubmitVectorSync).not.toHaveBeenCalled();
+  });
+
+  describe("shared time budget between reconcile and vector sync", () => {
+    const originalEnv = process.env.KB_SYNC_TOTAL_BUDGET_MS;
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      if (originalEnv === undefined) delete process.env.KB_SYNC_TOTAL_BUDGET_MS;
+      else process.env.KB_SYNC_TOTAL_BUDGET_MS = originalEnv;
+    });
+
+    it("never gives submitVectorSync more than its own tuned default, even when reconcile finished instantly", async () => {
+      process.env.KB_SYNC_TOTAL_BUDGET_MS = "22000";
+      vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+
+      await POST(makeRequest());
+
+      // Total budget (22s) minus ~0 elapsed would be 22s, but that's more
+      // than submitVectorSync's own live-verified-safe 15s default - the
+      // route must cap at the smaller of the two, not just hand over
+      // whatever's left of the shared budget.
+      expect(mockedSubmitVectorSync).toHaveBeenCalledWith(
+        expect.objectContaining({ timeBudgetMs: 15_000 }),
+      );
+    });
+
+    it("reduces submitVectorSync's timeBudgetMs by however long reconcileKeywordIndex actually took", async () => {
+      process.env.KB_SYNC_TOTAL_BUDGET_MS = "22000";
+      let now = 1_000_000;
+      vi.spyOn(Date, "now").mockImplementation(() => now);
+      mockedReconcile.mockImplementation(async () => {
+        now += 9_000; // simulate reconcile spending 9s of the shared budget
+        return diffResult() as never;
+      });
+
+      await POST(makeRequest());
+
+      expect(mockedSubmitVectorSync).toHaveBeenCalledWith(
+        expect.objectContaining({ timeBudgetMs: 13_000 }),
+      );
+    });
+
+    it("clamps submitVectorSync's timeBudgetMs to 0 instead of negative when reconcile used the whole budget", async () => {
+      process.env.KB_SYNC_TOTAL_BUDGET_MS = "22000";
+      let now = 1_000_000;
+      vi.spyOn(Date, "now").mockImplementation(() => now);
+      mockedReconcile.mockImplementation(async () => {
+        now += 30_000; // reconcile overran the entire shared budget
+        return diffResult() as never;
+      });
+
+      await POST(makeRequest());
+
+      expect(mockedSubmitVectorSync).toHaveBeenCalledWith(
+        expect.objectContaining({ timeBudgetMs: 0 }),
+      );
+    });
   });
 });

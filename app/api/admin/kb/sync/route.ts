@@ -3,7 +3,23 @@ import { z } from "zod";
 import { auth } from "@/auth";
 import { getTenant } from "@/app/lib/db/tenants";
 import { getKbDataSource } from "@/app/lib/bedrock-kb";
-import { reconcileKeywordIndex, trackTenantObjects, submitVectorSync } from "@/app/lib/kb-keyword-index";
+import {
+  reconcileKeywordIndex,
+  trackTenantObjects,
+  submitVectorSync,
+  DEFAULT_VECTOR_SYNC_TIME_BUDGET_MS,
+} from "@/app/lib/kb-keyword-index";
+
+// A fresh (non-resume) request can run reconcileKeywordIndex and
+// submitVectorSync back to back in the same Lambda invocation. Each is
+// independently time-budgeted (12s / 15s defaults), but nothing previously
+// bounded their *sum* against Amplify's real ~28s wall - a cold keyword-index
+// build followed by a non-trivial vector-sync submission could stack close to
+// 27s of budgeted work alone, and did: CloudWatch showed two live requests
+// hard-killed at 28002-28005ms. This shared ceiling caps the whole request,
+// with submitVectorSync's own default as a second cap so a fast reconcile
+// never hands it more time than already-verified-safe standalone.
+const DEFAULT_TOTAL_SYNC_BUDGET_MS = 22_000;
 
 const syncRequestSchema = z
   .object({
@@ -76,6 +92,12 @@ export async function POST(req: Request) {
     return NextResponse.json({ keywordIndex: null, keywordIndexError: null, vectorSync, vectorSyncError });
   }
 
+  // Both reconcileKeywordIndex and submitVectorSync can run in this same
+  // request below - track wall-clock time from here so submitVectorSync's
+  // budget can be shrunk by however long reconcileKeywordIndex actually took,
+  // not just by its own fixed default. See DEFAULT_TOTAL_SYNC_BUDGET_MS above.
+  const requestStartedAt = Date.now();
+
   // The tenant-scoped S3 object diff, however it was computed, drives vector
   // sync below. Keyword search disabled doesn't mean "skip diffing" - vector
   // sync still needs to know what changed, so trackTenantObjects computes
@@ -122,6 +144,10 @@ export async function POST(req: Request) {
   // resumeVectorSyncOnly request, handled above, continues vector sync's own
   // checkpoint independently of the keyword-index resume loop.)
   if (!resumeKeywordIndexOnly && objectDiff && !objectDiff.partial) {
+    const totalBudgetMs = Number(
+      process.env.KB_SYNC_TOTAL_BUDGET_MS || DEFAULT_TOTAL_SYNC_BUDGET_MS,
+    );
+    const remainingBudgetMs = Math.max(0, totalBudgetMs - (Date.now() - requestStartedAt));
     try {
       vectorSync = await submitVectorSync({
         tenantId: tenant.tenantId,
@@ -132,6 +158,7 @@ export async function POST(req: Request) {
         mode,
         usesTrackingFile: Boolean(tenant.disableKeywordSearch),
         diff: objectDiff,
+        timeBudgetMs: Math.min(remainingBudgetMs, DEFAULT_VECTOR_SYNC_TIME_BUDGET_MS),
       });
     } catch (err) {
       console.error("Vector sync failed:", err);

@@ -1120,7 +1120,7 @@ export async function trackTenantObjects({
 // Amplify's ~28s wall before any real latency. This budget leaves margin
 // for that, checkpointing the rest for the next round exactly like
 // reconcileKeywordIndex already does for its own per-object loop.
-const DEFAULT_VECTOR_SYNC_TIME_BUDGET_MS = 15_000;
+export const DEFAULT_VECTOR_SYNC_TIME_BUDGET_MS = 15_000;
 
 export type VectorSyncResult = {
   submittedCount: number;
