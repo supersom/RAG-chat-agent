@@ -50,17 +50,21 @@ resource "aws_iam_user_policy" "kb_source_bucket_upload" {
         ]
       },
       {
-        # The app itself never reads from these buckets (uploads are
-        # single-object PutObject via presigned URL; Bedrock reads through
-        # its own KB execution role, not this user). scripts/migrate-tenants-to-pool.ts
-        # is the first caller that needs to list+read the legacy source
-        # buckets, to copy their objects into the pool.
+        # Uploads are single-object PutObject via presigned URL, and Bedrock
+        # reads through its own KB execution role, not this user -- but the
+        # app's keyword-index reconciliation (kb-keyword-index.ts, runs on
+        # every "Sync Knowledge Base" click) lists and reads a tenant's KB
+        # source bucket directly, whichever bucket that is. Originally added
+        # for scripts/migrate-tenants-to-pool.ts against the two legacy
+        # buckets only; css-agent-kb-pool-src must be included too now that
+        # tenants are migrated onto it, or keyword-index sync fails there.
         Sid    = "KBSourceBucketMigrationRead"
         Effect = "Allow"
         Action = ["s3:ListBucket"]
         Resource = [
           "arn:aws:s3:::claude-qkstrt-kb",
           "arn:aws:s3:::css-agent-kb2-materiality-src",
+          "arn:aws:s3:::css-agent-kb-pool-src",
         ]
       },
       {
@@ -70,6 +74,7 @@ resource "aws_iam_user_policy" "kb_source_bucket_upload" {
         Resource = [
           "arn:aws:s3:::claude-qkstrt-kb/*",
           "arn:aws:s3:::css-agent-kb2-materiality-src/*",
+          "arn:aws:s3:::css-agent-kb-pool-src/*",
         ]
       },
     ]
