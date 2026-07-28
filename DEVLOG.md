@@ -1,5 +1,15 @@
 # Dev Log
 
+## 2026-07-27 (evening) — Removed the 3 non-migrated legacy tenants from production
+
+**Context:** Following the pooled-KB rollout (same date, below), the 3 tenants left on legacy KB1/KB2 — `SDD Live Smoke Test`, `Embed Debug Org`, `Org 2` — were dev/QA artifacts from earlier sessions, not real customers, and BACKLOG.md's open item for them assumed a future migration into the pool. Decided to remove them outright instead.
+
+**Decision:** wrote `scripts/remove-tenants.ts`, a one-off admin script mirroring `migrate-tenants-to-pool.ts`'s pattern (explicit `--tenant-id` args, never a table scan; `--dry-run` that performs zero writes). Scope is DB rows only — `Tenants`, `Users`, and `Activity` table rows via `DeleteCommand` — deliberately not their S3 KB source content or keyword-index `.sqlite` files, since the legacy buckets are shared and unnamespaced and one of them (KB1) also holds the already-migrated `OpenAI Default Test Org`'s data; a bulk delete by prefix isn't safe there.
+
+**Safety sequence:** `--dry-run` against production first (confirmed all 3 were still on legacy KBs `SLXQFWWXPR`/`YYPQ95NN4G`, not the pool KB `3P7BRYP5S5` — no risk of touching the 2 migrated tenants), reviewed counts with the user (3 tenants, 4 users, 295 activity rows), added a `--backup <path>` flag that dumps the full removal plan to JSON before any `DeleteCommand` runs, then ran live. Post-run verified via a direct `aws dynamodb scan` on `CustomerSupportAgent-Tenants` that exactly the 2 migrated tenants remain, both still pointed at the pool KB.
+
+**Status:** Live-run complete against production. Backup JSON written during the run to a job-scratch path (`/home/som/.claude/jobs/91b9bb95/tmp/tenant-removal-backup-20260727T214625.json`) — not durable storage; move it somewhere persistent if it needs to survive as a real recovery point. `scripts/remove-tenants.ts` + `scripts/remove-tenants.test.ts` committed to `pooled-kb-scaling`. BACKLOG.md's stale "3 tenants not yet migrated" item updated to reflect removal instead of migration.
+
 ## 2026-07-27 (afternoon) — Bedrock KB module: fixed orphaned resources on `terraform destroy`, live-verified
 
 **Context:** `infra/terraform/modules/bedrock_knowledge_base`'s "fresh KB" code path (`manage_vector_store = true`) had never been exercised by a real `terraform apply` anywhere in the repo — KB1/KB2 both use `manage_vector_store = false` since they predate Terraform. The README flagged this explicitly as "treat as unvalidated until someone actually runs it."
