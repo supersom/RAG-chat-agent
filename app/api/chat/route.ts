@@ -754,6 +754,8 @@ export async function POST(req: Request) {
 
   Please provide responses that use the information you have been given. If no relevant information is available, let the user know and offer to connect them with a human agent.
 
+  ${isRagWorking ? `Each numbered source above ("[1] Source: ...", "[2] Source: ...", etc.) can be cited. When a specific claim in your response comes from one of these sources, mark it inline immediately after the claim using that same number in brackets, e.g. "Refunds take 5 business days [2]." Use a source's number only when you are actually using that source's content for the claim right next to it. Do not cite a source number that wasn't provided above, and do not add citations to general knowledge or pleasantries that didn't come from the knowledge base.` : ""}
+
   ${categoriesContext}
 
   You are the first point of contact for the user and should try to resolve their issue or provide relevant information. If you are unable to help the user or if the user explicitly asks to talk to a human, you can redirect them to a human agent for further assistance.
@@ -776,10 +778,10 @@ export async function POST(req: Request) {
 
   Here are a few examples of how your response should look like:
 
-  Example of a response without redirection to a human agent:
+  Example of a response without redirection to a human agent, citing a source:
   {
     "thinking": "Providing relevant information from the knowledge base",
-    "response": "Here's the information you requested...",
+    "response": "Refunds are processed within 5 business days [1]. Let me know if you need anything else!",
     "user_mood": "curious",
     "suggested_questions": ["How do I update my account?", "What are the payment options?"],
     "debug": {

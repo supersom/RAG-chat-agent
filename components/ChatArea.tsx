@@ -6,6 +6,7 @@ import config from "@/config";
 import { loadSettings } from "@/components/SettingsModal";
 import { getTenantToken } from "@/app/lib/tenant-client";
 import { parseModelList, type Model } from "@/app/lib/models";
+import { linkifyCitations } from "@/app/lib/citations";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import ReactMarkdown from "react-markdown";
@@ -114,9 +115,11 @@ const SuggestedQuestions = ({
 const MessageContent = ({
   content,
   role,
+  messageId,
 }: {
   content: string;
   role: string;
+  messageId: string;
 }) => {
   const [thinking, setThinking] = useState(true);
   const [parsed, setParsed] = useState<{
@@ -174,10 +177,14 @@ const MessageContent = ({
     return <div>Something went wrong. Please try again.</div>;
   }
 
+  const displayText = parsed.response || content;
+
   return (
     <>
       <ReactMarkdown rehypePlugins={[rehypeRaw, rehypeHighlight]}>
-        {parsed.response || content}
+        {role === "assistant" && parsed.response
+          ? linkifyCitations(displayText, messageId)
+          : displayText}
       </ReactMarkdown>
       {parsed.redirect_to_agent && (
         <UISelector redirectToAgent={parsed.redirect_to_agent} />
@@ -624,6 +631,12 @@ function ChatArea() {
         data.suggested_questions = JSON.parse(suggestedQuestionsHeader);
       }
 
+      // Shared between the assistant message and its RAG sources event so
+      // an inline "[N]" citation in the message can link to that exact
+      // turn's Nth source in RightSidebar (DOM id `source-${turnId}-${N}`),
+      // not just whichever sources happen to be showing there right now.
+      const turnId = crypto.randomUUID();
+
       const ragHeader = response.headers.get("x-rag-sources");
       if (ragHeader) {
         const ragProcessed = performance.now();
@@ -638,6 +651,7 @@ function ChatArea() {
               sources,
               query: userMessage.content,
               debug: data.debug,
+              turnId,
             },
           }),
         );
@@ -650,7 +664,7 @@ function ChatArea() {
         const newMessages = [...prevMessages];
         const lastIndex = newMessages.length - 1;
         newMessages[lastIndex] = {
-          id: crypto.randomUUID(),
+          id: turnId,
           role: "assistant",
           timestamp: new Date().toISOString(),
           content: JSON.stringify(data),
@@ -812,6 +826,7 @@ function ChatArea() {
                       <MessageContent
                         content={message.content}
                         role={message.role}
+                        messageId={message.id}
                       />
                       {formatMessageTimestamp(message.timestamp) && (
                         <div

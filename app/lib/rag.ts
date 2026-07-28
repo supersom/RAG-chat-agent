@@ -150,10 +150,13 @@ export async function retrieveContext(
     const ragSources = mergeSources(vectorSources, keywordSources, n);
     console.log("🔍 Parsed RAG Sources:", ragSources); // Debug log
 
+    // Numbered 1-indexed to match ragSources' own order, so the model can
+    // cite "[N]" inline and the client can resolve it back to
+    // ragSources[N-1] (same array sent to the client via x-rag-sources).
     const context = ragSources
-      .map((source) => {
+      .map((source, index) => {
         const retrievalLabel = source.retrievalType === "keyword" ? "keyword" : "vector";
-        return `Source: ${source.fileName} (${retrievalLabel})\n${source.snippet}`;
+        return `[${index + 1}] Source: ${source.fileName} (${retrievalLabel})\n${source.snippet}`;
       })
       .join("\n\n");
 

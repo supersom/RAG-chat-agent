@@ -19,6 +19,11 @@ interface RAGHistoryItem {
   timestamp: string;
   query: string;
   userLabel?: string;
+  // Shared with the assistant message that produced these sources (see
+  // ChatArea's fetch handler), so an inline "[N]" citation in that message
+  // can link to this exact turn's Nth source, not just whatever's most
+  // recently in the sidebar.
+  turnId?: string;
 }
 
 interface DebugInfo {
@@ -198,9 +203,10 @@ const RightSidebar: React.FC = () => {
         sources: RAGSource[];
         query: string;
         debug?: DebugInfo;
+        turnId?: string;
       }>,
     ) => {
-      const { sources, query, debug } = event.detail;
+      const { sources, query, debug, turnId } = event.detail;
       if (
         !Array.isArray(sources) ||
         sources.length === 0 ||
@@ -224,6 +230,7 @@ const RightSidebar: React.FC = () => {
             sources: cleanedSources,
             timestamp: new Date().toISOString(),
             query: query || "Unknown query",
+            turnId,
           },
         ].slice(-MAX_HISTORY),
       );
@@ -381,7 +388,12 @@ const RightSidebar: React.FC = () => {
                   {historyItem.sources.map((source, sourceIndex) => (
                     <Card
                       key={source.id}
-                      className={`mb-2 ${fadeInUpClass}`}
+                      id={
+                        historyItem.turnId
+                          ? `source-${historyItem.turnId}-${sourceIndex}`
+                          : undefined
+                      }
+                      className={`mb-2 scroll-mt-4 target:ring-2 target:ring-primary ${fadeInUpClass}`}
                       style={{
                         ...fadeStyle,
                         animationDelay: `${index * 100 + sourceIndex * 75}ms`,

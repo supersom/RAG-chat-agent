@@ -64,6 +64,36 @@ describe("retrieveContext", () => {
       equals: { key: "tenantId", value: "tenant-b" },
     });
   });
+
+  it("numbers each source 1-indexed in the context string, matching ragSources' own order", async () => {
+    sendMock.mockResolvedValue({
+      retrievalResults: [
+        {
+          content: { text: "refunds take 5 days" },
+          location: { s3Location: { uri: "s3://bucket/tenants/acme/refunds.pdf" } },
+          score: 0.8,
+        },
+        {
+          content: { text: "shipping takes 2 days" },
+          location: { s3Location: { uri: "s3://bucket/tenants/acme/shipping.pdf" } },
+          score: 0.7,
+        },
+      ],
+    });
+
+    const { context, ragSources } = await retrieveContext(
+      "how long does shipping take",
+      "kb-123",
+      "tenant-a",
+      3,
+      undefined,
+      undefined,
+      true,
+    );
+
+    expect(context).toContain(`[1] Source: ${ragSources[0].fileName}`);
+    expect(context).toContain(`[2] Source: ${ragSources[1].fileName}`);
+  });
 });
 
 describe("mergeSources", () => {
