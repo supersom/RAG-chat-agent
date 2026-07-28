@@ -12,7 +12,6 @@ vi.mock("@/app/lib/bedrock-kb", () => ({
   getKbDataSource: vi.fn(),
   ingestKnowledgeBaseDocuments: vi.fn(),
   deleteKnowledgeBaseDocuments: vi.fn(),
-  getKnowledgeBaseDocumentsStatus: vi.fn(),
 }));
 
 vi.mock("@/app/lib/kb-keyword-index", () => ({
@@ -26,17 +25,15 @@ import {
   getKbDataSource,
   ingestKnowledgeBaseDocuments,
   deleteKnowledgeBaseDocuments,
-  getKnowledgeBaseDocumentsStatus,
 } from "@/app/lib/bedrock-kb";
 import { reconcileKeywordIndex, trackTenantObjects } from "@/app/lib/kb-keyword-index";
-import { POST, GET } from "./route";
+import { POST } from "./route";
 
 const mockedAuth = vi.mocked(auth);
 const mockedGetTenant = vi.mocked(getTenant);
 const mockedGetKbDataSource = vi.mocked(getKbDataSource);
 const mockedIngest = vi.mocked(ingestKnowledgeBaseDocuments);
 const mockedDelete = vi.mocked(deleteKnowledgeBaseDocuments);
-const mockedGetStatus = vi.mocked(getKnowledgeBaseDocumentsStatus);
 const mockedReconcile = vi.mocked(reconcileKeywordIndex);
 const mockedTrackTenantObjects = vi.mocked(trackTenantObjects);
 
@@ -81,7 +78,6 @@ beforeEach(() => {
   mockedGetKbDataSource.mockReset();
   mockedIngest.mockReset();
   mockedDelete.mockReset();
-  mockedGetStatus.mockReset();
   mockedReconcile.mockReset();
   mockedTrackTenantObjects.mockReset();
 
@@ -193,32 +189,5 @@ describe("POST /api/admin/kb/sync", () => {
 
     expect(res.status).toBe(401);
     expect(mockedIngest).not.toHaveBeenCalled();
-  });
-});
-
-describe("GET /api/admin/kb/sync", () => {
-  function makeStatusRequest(keys: string): Request {
-    return new Request(
-      `http://localhost/api/admin/kb/sync?keys=${encodeURIComponent(keys)}`,
-    );
-  }
-
-  it("polls status for the given comma-separated keys", async () => {
-    mockedGetStatus.mockResolvedValue([
-      { key: "tenants/acme/a.pdf", status: "INDEXED" },
-    ] as never);
-
-    const res = await GET(makeStatusRequest("tenants/acme/a.pdf"));
-    const data = await res.json();
-
-    expect(mockedGetStatus).toHaveBeenCalledWith(
-      expect.objectContaining({ keys: ["tenants/acme/a.pdf"] }),
-    );
-    expect(data.documents).toEqual([{ key: "tenants/acme/a.pdf", status: "INDEXED" }]);
-  });
-
-  it("rejects a request with no keys", async () => {
-    const res = await GET(new Request("http://localhost/api/admin/kb/sync"));
-    expect(res.status).toBe(400);
   });
 });

@@ -6,7 +6,6 @@ import {
   getKbDataSource,
   ingestKnowledgeBaseDocuments,
   deleteKnowledgeBaseDocuments,
-  getKnowledgeBaseDocumentsStatus,
 } from "@/app/lib/bedrock-kb";
 import { reconcileKeywordIndex, trackTenantObjects } from "@/app/lib/kb-keyword-index";
 
@@ -109,20 +108,24 @@ export async function POST(req: Request) {
   if (!resumeKeywordIndexOnly && objectDiff && !objectDiff.partial) {
     try {
       const keysToIngest = mode === "full" ? objectDiff.listedKeys : objectDiff.changedKeys;
-      const [ingestResults, deleteResults] = await Promise.all([
-        ingestKnowledgeBaseDocuments({
-          knowledgeBaseId: tenant.knowledgeBaseId,
-          dataSourceId: dataSource.dataSourceId,
-          bucketName: dataSource.bucketName,
-          keys: keysToIngest,
-        }),
-        deleteKnowledgeBaseDocuments({
-          knowledgeBaseId: tenant.knowledgeBaseId,
-          dataSourceId: dataSource.dataSourceId,
-          bucketName: dataSource.bucketName,
-          keys: objectDiff.deletedKeys,
-        }),
-      ]);
+      // Sequential, not Promise.all: Bedrock enforces a single account-wide
+      // concurrency budget summed *across* Ingest and Delete calls together
+      // (live-confirmed: "sum of concurrent IngestKnowledgeBaseDocuments and
+      // DeleteKnowledgeBaseDocuments requests can't exceed (10)"). Running
+      // both at once risks summing past that even with each individually
+      // staying under it.
+      const ingestResults = await ingestKnowledgeBaseDocuments({
+        knowledgeBaseId: tenant.knowledgeBaseId,
+        dataSourceId: dataSource.dataSourceId,
+        bucketName: dataSource.bucketName,
+        keys: keysToIngest,
+      });
+      const deleteResults = await deleteKnowledgeBaseDocuments({
+        knowledgeBaseId: tenant.knowledgeBaseId,
+        dataSourceId: dataSource.dataSourceId,
+        bucketName: dataSource.bucketName,
+        keys: objectDiff.deletedKeys,
+      });
       vectorSync = {
         mode,
         submittedCount: keysToIngest.length,
@@ -136,49 +139,4 @@ export async function POST(req: Request) {
   }
 
   return NextResponse.json({ keywordIndex, keywordIndexError, vectorSync, vectorSyncError });
-}
-
-// Fire-and-poll: POST submits documents for ingestion/deletion and returns
-// immediately with their initial (usually STARTING) status; the client polls
-// here with that same key list to watch them reach a terminal status
-// (INDEXED/FAILED/NOT_FOUND/etc).
-export async function GET(req: Request) {
-  const session = await auth();
-  if (!session) {
-    return Response.json({ error: "Authentication required" }, { status: 401 });
-  }
-  if (session.user.role !== "admin") {
-    return Response.json({ error: "Forbidden" }, { status: 403 });
-  }
-
-  const url = new URL(req.url);
-  const keys = (url.searchParams.get("keys") || "")
-    .split(",")
-    .map((key) => key.trim())
-    .filter(Boolean);
-  if (keys.length === 0) {
-    return Response.json({ error: "Missing keys" }, { status: 400 });
-  }
-
-  const tenant = await getTenant(session.user.tenantId);
-  if (!tenant) {
-    return Response.json({ error: "Tenant not found" }, { status: 404 });
-  }
-
-  const dataSource = await getKbDataSource(tenant.knowledgeBaseId);
-  if (!dataSource) {
-    return Response.json(
-      { error: "Could not resolve this tenant's knowledge base data source" },
-      { status: 400 },
-    );
-  }
-
-  const documents = await getKnowledgeBaseDocumentsStatus({
-    knowledgeBaseId: tenant.knowledgeBaseId,
-    dataSourceId: dataSource.dataSourceId,
-    bucketName: dataSource.bucketName,
-    keys,
-  });
-
-  return NextResponse.json({ documents });
 }

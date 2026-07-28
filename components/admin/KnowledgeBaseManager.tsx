@@ -170,7 +170,13 @@ export default function KnowledgeBaseManager() {
       return;
     }
 
-    const res = await fetch(`/api/admin/kb/sync?keys=${encodeURIComponent(keys.join(","))}`);
+    // POST, not a GET query param - a large tenant's key list doesn't fit in
+    // a URL (a full sync's ~2,000 keys join to over 200,000 characters).
+    const res = await fetch("/api/admin/kb/sync/status", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ keys }),
+    });
     if (!res.ok) {
       setIsVectorSyncPolling(false);
       return;

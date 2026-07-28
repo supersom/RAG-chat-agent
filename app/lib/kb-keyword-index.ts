@@ -147,10 +147,42 @@ function keywordIndexLocation(tenantId: string, knowledgeBaseId: string, bucketN
   };
 }
 
+// A dedicated file for trackTenantObjects, deliberately separate from
+// keywordIndexLocation's - that file can carry a large FTS chunks table
+// once a tenant has ever had keyword search enabled, and trackTenantObjects
+// only ever needs a handful of small tracking columns. Downloading a large
+// chunks-laden file just to read/write those columns is expensive and
+// pointless; live-confirmed on a real 75MB file: ~80-90s just to download
+// and open it, close to Amplify's ~28s platform wall by itself. A separate,
+// always-small file avoids that cost structurally rather than requiring a
+// one-time (and itself slow) purge migration through the same bottleneck.
+function trackingLocation(tenantId: string, knowledgeBaseId: string, bucketName: string) {
+  const indexBucket = process.env.KEYWORD_INDEX_S3_BUCKET || bucketName;
+  const safeTenant = encodeURIComponent(tenantId);
+  const safeKb = encodeURIComponent(knowledgeBaseId);
+  return {
+    indexBucket,
+    indexKey: `${keywordIndexPrefix()}/${safeTenant}/${safeKb}-tracking.sqlite`,
+  };
+}
+
 function tempIndexPath(tenantId: string, knowledgeBaseId: string) {
   const hash = crypto
     .createHash("sha256")
     .update(`${tenantId}:${knowledgeBaseId}`)
+    .digest("hex")
+    .slice(0, 12);
+  return path.join(os.tmpdir(), `customer-support-agent-keyword-${hash}.sqlite`);
+}
+
+// Distinct from tempIndexPath so a warm Lambda container never has
+// trackTenantObjects and reconcileKeywordIndex fighting over (or
+// accidentally reusing a stale local copy of) the same local file for what
+// are, since trackingLocation, two different remote S3 objects.
+function tempTrackingPath(tenantId: string, knowledgeBaseId: string) {
+  const hash = crypto
+    .createHash("sha256")
+    .update(`tracking:${tenantId}:${knowledgeBaseId}`)
     .digest("hex")
     .slice(0, 12);
   return path.join(os.tmpdir(), `customer-support-agent-keyword-${hash}.sqlite`);
@@ -909,9 +941,9 @@ export async function trackTenantObjects({
   deletedKeys: string[];
   partial: boolean;
 }> {
-  const { indexBucket, indexKey } = keywordIndexLocation(tenantId, knowledgeBaseId, bucketName);
+  const { indexBucket, indexKey } = trackingLocation(tenantId, knowledgeBaseId, bucketName);
   const client = s3Client(region, credentials);
-  const dbPath = tempIndexPath(tenantId, knowledgeBaseId);
+  const dbPath = tempTrackingPath(tenantId, knowledgeBaseId);
   await downloadExistingIndex({ client, indexBucket, indexKey, dbPath });
 
   const db = initDatabase(dbPath);

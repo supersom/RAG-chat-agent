@@ -76,6 +76,15 @@ function tempDbPathFor(tenantId: string, knowledgeBaseId: string) {
   return path.join(os.tmpdir(), `customer-support-agent-keyword-${hash}.sqlite`);
 }
 
+function tempTrackingDbPathFor(tenantId: string, knowledgeBaseId: string) {
+  const hash = crypto
+    .createHash("sha256")
+    .update(`tracking:${tenantId}:${knowledgeBaseId}`)
+    .digest("hex")
+    .slice(0, 12);
+  return path.join(os.tmpdir(), `customer-support-agent-keyword-${hash}.sqlite`);
+}
+
 function cleanupTempDb() {
   const dbPath = tempDbPathFor(TENANT_ID, KB_ID);
   if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
@@ -713,14 +722,20 @@ describe("trackTenantObjects", () => {
   const TRACK_BUCKET = "test-bucket-track";
 
   function trackDbPath() {
+    return tempTrackingDbPathFor(TRACK_TENANT, TRACK_KB_ID);
+  }
+
+  function reconcileDbPath() {
     return tempDbPathFor(TRACK_TENANT, TRACK_KB_ID);
   }
 
   beforeEach(() => {
     if (fs.existsSync(trackDbPath())) fs.unlinkSync(trackDbPath());
+    if (fs.existsSync(reconcileDbPath())) fs.unlinkSync(reconcileDbPath());
   });
   afterEach(() => {
     if (fs.existsSync(trackDbPath())) fs.unlinkSync(trackDbPath());
+    if (fs.existsSync(reconcileDbPath())) fs.unlinkSync(reconcileDbPath());
   });
 
   it("records tracking rows without downloading file content, and reports the object as unchanged next time", async () => {
@@ -787,5 +802,56 @@ describe("trackTenantObjects", () => {
     });
 
     expect(third.deletedKeys).toEqual([`tenants/${TRACK_TENANT}/a.txt`]);
+  });
+
+  it("never downloads reconcileKeywordIndex's file, even when a large one already exists for this tenant", async () => {
+    // Simulate a tenant that had keyword search enabled earlier: a large,
+    // real chunks-laden file already sits at keywordIndexLocation's key.
+    // trackTenantObjects must use a structurally separate location and
+    // never touch that file at all - not "download it and purge it",
+    // which live-testing showed can itself be too slow (~80-90s to
+    // download and open a real 75MB file, close to Amplify's ~28s wall).
+    sendMock.mockImplementation(async (command: any) => {
+      const type = command.__type;
+      if (type === "GetObjectCommand") {
+        const key = command.input.Key as string;
+        if (!key.endsWith("-tracking.sqlite")) {
+          throw new Error(
+            `trackTenantObjects must never request reconcileKeywordIndex's file, requested: ${key}`,
+          );
+        }
+        const err: any = new Error("NoSuchKey");
+        err.name = "NoSuchKey";
+        err.$metadata = { httpStatusCode: 404 };
+        throw err;
+      }
+      if (type === "ListObjectsV2Command") {
+        return {
+          Contents: [
+            {
+              Key: `tenants/${TRACK_TENANT}/a.txt`,
+              ETag: '"etag-a"',
+              Size: 10,
+              LastModified: new Date("2026-01-01T00:00:00Z"),
+            },
+          ],
+          IsTruncated: false,
+        };
+      }
+      if (type === "PutObjectCommand") {
+        const key = command.input.Key as string;
+        expect(key.endsWith("-tracking.sqlite")).toBe(true);
+        return {};
+      }
+      throw new Error(`Unexpected command: ${type}`);
+    });
+
+    const result = await trackTenantObjects({
+      tenantId: TRACK_TENANT,
+      knowledgeBaseId: TRACK_KB_ID,
+      bucketName: TRACK_BUCKET,
+    });
+
+    expect(result.changedKeys).toEqual([`tenants/${TRACK_TENANT}/a.txt`]);
   });
 });
