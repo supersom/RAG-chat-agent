@@ -61,16 +61,18 @@ export async function POST(req: Request) {
 
   let keywordIndex = null;
   let keywordIndexError = null;
-  try {
-    keywordIndex = await reconcileKeywordIndex({
-      tenantId: tenant.tenantId,
-      knowledgeBaseId: tenant.knowledgeBaseId,
-      bucketName: dataSource.bucketName,
-      region: tenant.awsRegion,
-    });
-  } catch (err) {
-    console.error("Keyword index update failed:", err);
-    keywordIndexError = err instanceof Error ? err.message : "Keyword index update failed";
+  if (!tenant.disableKeywordSearch) {
+    try {
+      keywordIndex = await reconcileKeywordIndex({
+        tenantId: tenant.tenantId,
+        knowledgeBaseId: tenant.knowledgeBaseId,
+        bucketName: dataSource.bucketName,
+        region: tenant.awsRegion,
+      });
+    } catch (err) {
+      console.error("Keyword index update failed:", err);
+      keywordIndexError = err instanceof Error ? err.message : "Keyword index update failed";
+    }
   }
 
   return NextResponse.json({ jobId, keywordIndex, keywordIndexError });
