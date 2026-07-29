@@ -101,9 +101,19 @@ resource "aws_iam_role_policy" "kb_keyword_sync_worker" {
 # makes. Confirmed missing by the final whole-branch review: without this,
 # the very first "Sync" click would fail with AccessDenied, silently caught
 # by the route's own try/catch and surfaced as a keywordEnqueueError.
-resource "aws_iam_user_policy" "kb_keyword_sync_app_access" {
+#
+# A standalone (customer-managed) policy, not an inline aws_iam_user_policy -
+# confirmed live: claude-qkstart-bedrock already carries several inline
+# policies (dynamodb_tenants_users, kb_source_bucket_upload,
+# cloudwatch_logs_read, read_amplify_cloudwatch_logs, see iam.tf), and inline
+# policies share a single 2,048-byte quota AGGREGATED ACROSS ALL of a user's
+# inline policies (not 2,048 bytes per policy) - adding this as a 5th inline
+# policy tipped the account over that ceiling
+# ("LimitExceeded: Maximum policy size of 2048 bytes exceeded"). A managed
+# policy has its own separate, much larger 6,144-byte quota per policy and
+# doesn't count against the inline aggregate at all.
+resource "aws_iam_policy" "kb_keyword_sync_app_access" {
   name = "KeywordSyncAppAccess"
-  user = data.aws_iam_user.service_user.user_name
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -122,6 +132,11 @@ resource "aws_iam_user_policy" "kb_keyword_sync_app_access" {
       },
     ]
   })
+}
+
+resource "aws_iam_user_policy_attachment" "kb_keyword_sync_app_access" {
+  user       = data.aws_iam_user.service_user.user_name
+  policy_arn = aws_iam_policy.kb_keyword_sync_app_access.arn
 }
 
 resource "aws_lambda_function" "kb_keyword_sync_worker" {
