@@ -35,6 +35,7 @@ import {
   extractText,
   trackTenantObjects,
   submitVectorSync,
+  awsCredentials,
 } from "./kb-keyword-index";
 import DOMMatrixShim from "@thednp/dommatrix";
 import Database from "better-sqlite3";
@@ -110,6 +111,41 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanupTempDb();
+});
+
+describe("awsCredentials", () => {
+  const originalAccessKey = process.env.BAWS_ACCESS_KEY_ID;
+  const originalSecretKey = process.env.BAWS_SECRET_ACCESS_KEY;
+
+  afterEach(() => {
+    if (originalAccessKey === undefined) delete process.env.BAWS_ACCESS_KEY_ID;
+    else process.env.BAWS_ACCESS_KEY_ID = originalAccessKey;
+    if (originalSecretKey === undefined) delete process.env.BAWS_SECRET_ACCESS_KEY;
+    else process.env.BAWS_SECRET_ACCESS_KEY = originalSecretKey;
+  });
+
+  it("returns explicit credentials when provided", () => {
+    expect(
+      awsCredentials({ accessKeyId: "explicit-key", secretAccessKey: "explicit-secret" }),
+    ).toEqual({ accessKeyId: "explicit-key", secretAccessKey: "explicit-secret" });
+  });
+
+  it("falls back to BAWS_* env vars when no explicit credentials given", () => {
+    process.env.BAWS_ACCESS_KEY_ID = "env-key";
+    process.env.BAWS_SECRET_ACCESS_KEY = "env-secret";
+
+    expect(awsCredentials(undefined)).toEqual({
+      accessKeyId: "env-key",
+      secretAccessKey: "env-secret",
+    });
+  });
+
+  it("returns undefined when neither explicit credentials nor BAWS_* env vars are present, so the AWS SDK's own default provider chain (e.g. a Lambda execution role) takes over", () => {
+    delete process.env.BAWS_ACCESS_KEY_ID;
+    delete process.env.BAWS_SECRET_ACCESS_KEY;
+
+    expect(awsCredentials(undefined)).toBeUndefined();
+  });
 });
 
 describe("reconcileKeywordIndex checkpointing", () => {

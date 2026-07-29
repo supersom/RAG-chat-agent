@@ -124,17 +124,29 @@ type ReconcileRunState = {
   errors: string[];
 };
 
-function awsCredentials(credentials?: AwsCredentials): { accessKeyId: string; secretAccessKey: string } {
-  return {
-    accessKeyId: (credentials?.accessKeyId || process.env.BAWS_ACCESS_KEY_ID)!,
-    secretAccessKey: (credentials?.secretAccessKey || process.env.BAWS_SECRET_ACCESS_KEY)!,
-  };
+// Returns undefined (not a partially-undefined object) when neither an
+// explicit override nor BAWS_* env vars are present, so callers can omit
+// the `credentials` field entirely from the AWS SDK client constructor -
+// that's what lets the SDK's own default provider chain discover a Lambda
+// execution role's credentials automatically. Passing an explicit object
+// with undefined fields (the old behavior) overrides that discovery and
+// breaks in any context that isn't the Next.js app's own BAWS_*-keyed one
+// (e.g. the async keyword-sync worker Lambda, which has its own execution
+// role and no BAWS_* env vars at all).
+export function awsCredentials(
+  credentials?: AwsCredentials,
+): { accessKeyId: string; secretAccessKey: string } | undefined {
+  const accessKeyId = credentials?.accessKeyId || process.env.BAWS_ACCESS_KEY_ID;
+  const secretAccessKey = credentials?.secretAccessKey || process.env.BAWS_SECRET_ACCESS_KEY;
+  if (!accessKeyId || !secretAccessKey) return undefined;
+  return { accessKeyId, secretAccessKey };
 }
 
 function s3Client(region?: string, credentials?: AwsCredentials): S3Client {
+  const resolvedCredentials = awsCredentials(credentials);
   return new S3Client({
     region: region || process.env.AWS_REGION || process.env.BAWS_REGION || DEFAULT_REGION,
-    credentials: awsCredentials(credentials),
+    ...(resolvedCredentials ? { credentials: resolvedCredentials } : {}),
   });
 }
 
