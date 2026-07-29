@@ -245,15 +245,28 @@ describe("POST /api/admin/kb/sync", () => {
       expect(data.keywordIndex).toBeNull();
     });
 
-    it("reports keywordIndexError and still returns a successful vectorSync when sendKeywordSyncJob throws", async () => {
+    it("reports keywordEnqueueError and still returns a successful vectorSync when sendKeywordSyncJob throws", async () => {
       mockedSendKeywordSyncJob.mockRejectedValue(new Error("SQS unavailable"));
 
       const res = await POST(makeRequest());
       const data = await res.json();
 
-      expect(data.keywordIndexError).toBe("SQS unavailable");
+      expect(data.keywordEnqueueError).toBe("SQS unavailable");
+      expect(data.objectTrackingError).toBeNull();
       expect(data.keywordIndex).toBeNull();
       expect(data.vectorSync.submittedCount).toBe(1);
+    });
+
+    it("keeps a trackTenantObjects failure out of keywordEnqueueError, so the client still polls a job that really was enqueued", async () => {
+      mockedTrackTenantObjects.mockRejectedValue(new Error("S3 ListBucket denied"));
+
+      const res = await POST(makeRequest());
+      const data = await res.json();
+
+      expect(data.objectTrackingError).toBe("S3 ListBucket denied");
+      expect(data.keywordEnqueueError).toBeNull();
+      expect(mockedSendKeywordSyncJob).toHaveBeenCalled();
+      expect(data.keywordIndex).toEqual({ status: "queued" });
     });
 
     it("never writes a queued job record when sendKeywordSyncJob throws, so the tenant isn't permanently stuck", async () => {

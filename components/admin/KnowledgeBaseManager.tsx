@@ -90,9 +90,9 @@ export default function KnowledgeBaseManager() {
   const isVectorSyncSubmittingRef = useRef(false);
   const [keywordSyncJob, setKeywordSyncJob] = useState<KeywordSyncJob | null>(null);
   // Enqueue-time failures (e.g. sendKeywordSyncJob throwing) never produce a
-  // job row at all - trackTenantObjects has always written a diff-scoped
-  // keywordIndexError for that case, so there's nothing for /keyword-status to
-  // ever poll and surface. Kept separate from keywordSyncJob.failureMessage,
+  // job row at all, so there's nothing for /keyword-status to ever poll and
+  // surface - the route reports them as its own keywordEnqueueError field,
+  // distinct from objectTrackingError. Kept separate from keywordSyncJob.failureMessage,
   // which covers a job that WAS enqueued and later failed inside the worker -
   // two structurally different failure points, not the same error.
   const [keywordEnqueueError, setKeywordEnqueueError] = useState<string | null>(null);
@@ -324,7 +324,7 @@ export default function KnowledgeBaseManager() {
 
       const {
         keywordIndex: newKeywordIndex,
-        keywordIndexError: newKeywordIndexError,
+        keywordEnqueueError: newKeywordEnqueueError,
         vectorSync: newVectorSync,
         vectorSyncError: newVectorSyncError,
       } = await res.json();
@@ -337,12 +337,14 @@ export default function KnowledgeBaseManager() {
         }
       }
 
-      // newKeywordIndexError means the enqueue attempt itself failed (e.g. SQS
-      // unavailable) - no job was ever created, so there's nothing to poll for.
-      // Surface it directly instead of starting a poll loop that would never
-      // find anything.
-      if (newKeywordIndexError) {
-        setKeywordEnqueueError(newKeywordIndexError);
+      // keywordEnqueueError and keywordIndex are independent now - an enqueue
+      // can succeed even when the (unrelated) object-tracking diff step
+      // failed, and vice versa. Only a real enqueue failure means no job was
+      // ever created and there is therefore nothing to poll for; reading the
+      // conflated field previously suppressed polling for jobs that were in
+      // fact running.
+      if (newKeywordEnqueueError) {
+        setKeywordEnqueueError(newKeywordEnqueueError);
       } else if (newKeywordIndex) {
         startPollingKeywordSyncJob();
       }

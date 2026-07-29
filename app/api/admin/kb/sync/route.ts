@@ -86,7 +86,13 @@ export async function POST(req: Request) {
       console.error("Vector sync failed:", err);
       vectorSyncError = err instanceof Error ? err.message : "Vector sync failed";
     }
-    return NextResponse.json({ keywordIndex: null, keywordIndexError: null, vectorSync, vectorSyncError });
+    return NextResponse.json({
+      keywordIndex: null,
+      objectTrackingError: null,
+      keywordEnqueueError: null,
+      vectorSync,
+      vectorSyncError,
+    });
   }
 
   const requestStartedAt = Date.now();
@@ -101,7 +107,7 @@ export async function POST(req: Request) {
     deletedKeys: string[];
     partial: boolean;
   } | null = null;
-  let keywordIndexError: string | null = null;
+  let objectTrackingError: string | null = null;
   try {
     objectDiff = await trackTenantObjects({
       tenantId: tenant.tenantId,
@@ -111,7 +117,7 @@ export async function POST(req: Request) {
     });
   } catch (err) {
     console.error("Tenant object tracking failed:", err);
-    keywordIndexError = err instanceof Error ? err.message : "Tenant object tracking failed";
+    objectTrackingError = err instanceof Error ? err.message : "Tenant object tracking failed";
   }
 
   if (objectDiff && !objectDiff.partial) {
@@ -138,6 +144,12 @@ export async function POST(req: Request) {
   }
 
   let keywordIndex: { status: "queued" | "running" } | null = null;
+  // Deliberately separate from objectTrackingError above: the two steps are
+  // independent, so an enqueue can succeed while the tracking diff failed
+  // and vice versa. Sharing one field made the client treat a tracking
+  // failure as an enqueue failure and skip polling a job that was in fact
+  // running.
+  let keywordEnqueueError: string | null = null;
   if (!tenant.disableKeywordSearch) {
     try {
       const existingJob = await getKeywordSyncJob(tenant.tenantId);
@@ -188,9 +200,15 @@ export async function POST(req: Request) {
       // and submitVectorSync above - a failure here must not crash the
       // whole response and discard an already-successful vectorSync result.
       console.error("Failed to enqueue keyword-index sync:", err);
-      keywordIndexError = err instanceof Error ? err.message : "Failed to enqueue keyword-index sync";
+      keywordEnqueueError = err instanceof Error ? err.message : "Failed to enqueue keyword-index sync";
     }
   }
 
-  return NextResponse.json({ keywordIndex, keywordIndexError, vectorSync, vectorSyncError });
+  return NextResponse.json({
+    keywordIndex,
+    objectTrackingError,
+    keywordEnqueueError,
+    vectorSync,
+    vectorSyncError,
+  });
 }
