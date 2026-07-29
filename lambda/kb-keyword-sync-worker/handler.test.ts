@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
+import type { Context } from "aws-lambda";
 
 vi.mock("../../app/lib/kb-keyword-index", () => ({
   reconcileKeywordIndex: vi.fn(),
@@ -20,6 +21,18 @@ function sqsEvent(body: Record<string, unknown>) {
     Records: [{ messageId: "m1", body: JSON.stringify(body) }],
   } as never;
 }
+
+// getRemainingTimeInMillis is the only Context member this handler touches -
+// the rest of the real Context surface is irrelevant here.
+function mockContext(remainingMs: number): Context {
+  return {
+    getRemainingTimeInMillis: () => remainingMs,
+  } as Context;
+}
+
+// SQSHandler's third argument is a callback the handler never uses (it's a
+// promise-returning handler); a no-op satisfies the type.
+const noopCallback = () => {};
 
 function reconcileResult(overrides: Partial<Awaited<ReturnType<typeof reconcileKeywordIndex>>> = {}) {
   return {
@@ -61,7 +74,7 @@ describe("kb-keyword-sync-worker handler", () => {
   it("writes a running record, calls reconcileKeywordIndex once when it finishes non-partial, then writes complete", async () => {
     mockedReconcile.mockResolvedValue(reconcileResult({ partial: false }));
 
-    await handler(sqsEvent(message));
+    await handler(sqsEvent(message), mockContext(600_000), noopCallback);
 
     expect(mockedReconcile).toHaveBeenCalledTimes(1);
     expect(mockedReconcile).toHaveBeenCalledWith(
@@ -86,7 +99,7 @@ describe("kb-keyword-sync-worker handler", () => {
       .mockResolvedValueOnce(reconcileResult({ partial: true, indexedObjectCount: 1 }))
       .mockResolvedValueOnce(reconcileResult({ partial: false, indexedObjectCount: 1 }));
 
-    await handler(sqsEvent(message));
+    await handler(sqsEvent(message), mockContext(600_000), noopCallback);
 
     expect(mockedReconcile).toHaveBeenCalledTimes(3);
     const statuses = mockedPut.mock.calls.map(([job]) => job.status);
@@ -96,12 +109,79 @@ describe("kb-keyword-sync-worker handler", () => {
   it("writes a failed record with the error message when reconcileKeywordIndex throws", async () => {
     mockedReconcile.mockRejectedValue(new Error("S3 GetObject denied"));
 
-    await handler(sqsEvent(message));
+    await handler(sqsEvent(message), mockContext(600_000), noopCallback);
 
     const statuses = mockedPut.mock.calls.map(([job]) => job.status);
     expect(statuses).toEqual(["running", "failed"]);
     const finalJob = mockedPut.mock.calls[1][0];
     expect(finalJob.failureMessage).toBe("S3 GetObject denied");
     expect(finalJob.finishedAt).not.toBeNull();
+  });
+
+  it("passes the Lambda's actual remaining time (minus the safety margin) as timeBudgetMs to reconcileKeywordIndex", async () => {
+    mockedReconcile.mockResolvedValue(reconcileResult({ partial: false }));
+
+    await handler(sqsEvent(message), mockContext(120_000), noopCallback);
+
+    expect(mockedReconcile).toHaveBeenCalledWith(
+      expect.objectContaining({ timeBudgetMs: 90_000 }), // 120_000 - 30_000 margin
+    );
+  });
+
+  it("leaves the job running (not failed) and rethrows when remaining time drops below the minimum round budget, so SQS redelivers", async () => {
+    mockedReconcile.mockResolvedValue(reconcileResult({ partial: true }));
+
+    await expect(
+      // 35_000 - 30_000 margin = 5_000, below MIN_ROUND_BUDGET_MS
+      handler(sqsEvent(message), mockContext(35_000), noopCallback),
+    ).rejects.toThrow("Ran out of safe time");
+
+    const statuses = mockedPut.mock.calls.map(([job]) => job.status);
+    expect(statuses).toEqual(["running"]); // never reaches "failed" or "complete"
+    expect(mockedReconcile).not.toHaveBeenCalled();
+  });
+
+  it("stops looping mid-job once the remaining time runs out, keeping the work already checkpointed by the completed rounds", async () => {
+    mockedReconcile.mockResolvedValue(reconcileResult({ partial: true }));
+    let remainingMs = 100_000;
+    const draining = {
+      getRemainingTimeInMillis: () => {
+        const current = remainingMs;
+        remainingMs -= 40_000;
+        return current;
+      },
+    } as Context;
+
+    // Rounds see 100s then 60s remaining (70s/30s budgets); the third check
+    // sees 20s, i.e. a -10s budget, so it stops instead of starting a round.
+    await expect(handler(sqsEvent(message), draining, noopCallback)).rejects.toThrow(
+      "Ran out of safe time",
+    );
+
+    expect(mockedReconcile).toHaveBeenCalledTimes(2);
+    expect(mockedReconcile.mock.calls.map(([params]) => params.timeBudgetMs)).toEqual([
+      70_000, 30_000,
+    ]);
+  });
+
+  it("reports the job's real start time on the terminal record, not the time it finished", async () => {
+    mockedReconcile.mockImplementation(async () => {
+      vi.setSystemTime(new Date("2026-07-28T00:05:00.000Z"));
+      return reconcileResult({ partial: false });
+    });
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-28T00:00:00.000Z"));
+
+    try {
+      await handler(sqsEvent(message), mockContext(600_000), noopCallback);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const runningJob = mockedPut.mock.calls[0][0];
+    const completeJob = mockedPut.mock.calls[1][0];
+    expect(runningJob.startedAt).toBe("2026-07-28T00:00:00.000Z");
+    expect(completeJob.startedAt).toBe("2026-07-28T00:00:00.000Z");
+    expect(completeJob.finishedAt).toBe("2026-07-28T00:05:00.000Z");
   });
 });

@@ -1,4 +1,4 @@
-import type { SQSEvent, SQSHandler } from "aws-lambda";
+import type { SQSEvent, SQSHandler, Context } from "aws-lambda";
 import { reconcileKeywordIndex } from "../../app/lib/kb-keyword-index";
 import { putKeywordSyncJob, KeywordSyncJob } from "../../app/lib/db/keyword-sync-jobs";
 import { workerDbClient } from "./db-client";
@@ -10,6 +10,23 @@ type JobMessage = {
   region?: string;
   mode: "full" | "incremental";
 };
+
+// Headroom for the final S3 upload (the whole SQLite file, not just the
+// object-loop work) plus Lambda's own shutdown/freeze overhead - measured
+// worst case for this tenant's current index size was 60-180s for
+// download+upload alone, so this stays conservative relative to that.
+const SAFETY_MARGIN_MS = 30_000;
+// Below this remaining budget, don't even start another reconcileKeywordIndex
+// round - let SQS redeliver the message to a fresh invocation (fresh 600s)
+// instead of starting work that can't possibly make meaningful progress
+// before this invocation's own deadline.
+const MIN_ROUND_BUDGET_MS = 10_000;
+
+// Distinct from a real reconcileKeywordIndex failure - this signals "ran out
+// of safe time in this invocation, needs another one," not "this job is
+// broken." Caught separately in processMessage so it does NOT get written
+// to DynamoDB as status: "failed".
+class TimeBudgetExhaustedError extends Error {}
 
 function emptyJob(message: JobMessage, status: KeywordSyncJob["status"]): KeywordSyncJob {
   return {
@@ -31,28 +48,44 @@ function emptyJob(message: JobMessage, status: KeywordSyncJob["status"]): Keywor
   };
 }
 
-async function processMessage(message: JobMessage): Promise<void> {
-  await putKeywordSyncJob(emptyJob(message, "running"), workerDbClient);
+async function processMessage(message: JobMessage, context: Context): Promise<void> {
+  // Captured once and threaded through every subsequent write: the terminal
+  // record must report when the job actually started, not when it finished.
+  const startedAt = new Date().toISOString();
+  await putKeywordSyncJob({ ...emptyJob(message, "running"), startedAt }, workerDbClient);
 
   let result;
   try {
-    // No timeBudgetMs override: this Lambda's own timeout (10 minutes, see
-    // infra/terraform/kb_keyword_sync.tf) is the only ceiling, comfortably
-    // above the measured 60-180s worst case for this tenant's current index
-    // size - unlike the in-request path this replaces, there's no shared
-    // ~28s wall to budget against here.
     do {
+      const remainingMs = context.getRemainingTimeInMillis() - SAFETY_MARGIN_MS;
+      if (remainingMs < MIN_ROUND_BUDGET_MS) {
+        throw new TimeBudgetExhaustedError(
+          "Ran out of safe time in this invocation; SQS will redeliver to continue",
+        );
+      }
       result = await reconcileKeywordIndex({
         tenantId: message.tenantId,
         knowledgeBaseId: message.knowledgeBaseId,
         bucketName: message.bucketName,
         region: message.region,
+        timeBudgetMs: remainingMs,
       });
     } while (result.partial);
   } catch (err) {
+    if (err instanceof TimeBudgetExhaustedError) {
+      // Leave the job "running" (already written above) and rethrow so this
+      // Lambda invocation fails for this record - SQS redelivers it (up to
+      // maxReceiveCount, see kb_keyword_sync.tf), and a fresh invocation's
+      // reconcileKeywordIndex call resumes from its own internal checkpoint
+      // (already uploaded to S3 by the last completed round within THIS
+      // invocation's do-while loop), rather than this being treated as a
+      // genuine job failure.
+      throw err;
+    }
     await putKeywordSyncJob(
       {
         ...emptyJob(message, "failed"),
+        startedAt,
         finishedAt: new Date().toISOString(),
         failureMessage: err instanceof Error ? err.message : String(err),
       },
@@ -66,7 +99,7 @@ async function processMessage(message: JobMessage): Promise<void> {
       tenantId: message.tenantId,
       status: "complete",
       mode: message.mode,
-      startedAt: new Date().toISOString(),
+      startedAt,
       finishedAt: new Date().toISOString(),
       listedObjectCount: result.listedObjectCount,
       changedObjectCount: result.changedObjectCount,
@@ -83,9 +116,9 @@ async function processMessage(message: JobMessage): Promise<void> {
   );
 }
 
-export const handler: SQSHandler = async (event: SQSEvent) => {
+export const handler: SQSHandler = async (event: SQSEvent, context: Context) => {
   for (const record of event.Records) {
     const message = JSON.parse(record.body) as JobMessage;
-    await processMessage(message);
+    await processMessage(message, context);
   }
 };
