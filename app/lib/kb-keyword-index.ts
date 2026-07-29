@@ -884,6 +884,15 @@ const DEFAULT_TIME_BUDGET_MS = 12_000;
 // well clear of that wall, based on where the measured blowup began.
 const DEFAULT_MAX_PDF_BYTES = 12 * 1024 * 1024;
 
+// Caps the *returned* errors array only - internal accumulation in `run`
+// (persisted via writeReconcileRun for checkpoint/resume bookkeeping) is
+// untouched, since SQLite has no comparable size constraint. This exists
+// specifically to keep the DynamoDB KeywordSyncJobs item (which stores this
+// array directly) under DynamoDB's 400KB item limit for a tenant with a
+// large number of failing objects. errorCount stays the true, uncapped
+// total - only the array of individual messages is capped.
+const MAX_RETURNED_ERRORS = 50;
+
 export async function reconcileKeywordIndex({
   tenantId,
   knowledgeBaseId,
@@ -1051,7 +1060,7 @@ export async function reconcileKeywordIndex({
     skippedObjectCount: run.skippedObjectCount,
     errorCount: run.errors.length,
     partial,
-    errors: run.errors,
+    errors: run.errors.slice(0, MAX_RETURNED_ERRORS),
     listedKeys,
     changedKeys,
     deletedKeys,

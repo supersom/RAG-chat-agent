@@ -903,6 +903,62 @@ describe("trackTenantObjects", () => {
   });
 });
 
+describe("reconcileKeywordIndex error reporting", () => {
+  const ERR_TENANT = "test-tenant-errors";
+  const ERR_KB_ID = "test-kb-errors";
+  const ERR_BUCKET = "test-bucket-errors";
+
+  function errDbPaths() {
+    return [tempDbPathFor(ERR_TENANT, ERR_KB_ID), tempTrackingDbPathFor(ERR_TENANT, ERR_KB_ID)];
+  }
+  function removeErrDbs() {
+    for (const p of errDbPaths()) if (fs.existsSync(p)) fs.unlinkSync(p);
+  }
+
+  beforeEach(removeErrDbs);
+  afterEach(removeErrDbs);
+
+  it("caps the returned errors array while errorCount stays the true total, so the DynamoDB job item can't blow past 400KB", async () => {
+    const failingObjects = Array.from({ length: 60 }, (_, index) => ({
+      Key: `tenants/${ERR_TENANT}/doc-${index}.txt`,
+      ETag: `"etag-${index}"`,
+      Size: 10,
+      LastModified: new Date("2026-01-01T00:00:00Z"),
+    }));
+
+    sendMock.mockImplementation(async (command: any) => {
+      const type = command.__type;
+      if (type === "GetObjectCommand") {
+        const key = command.input.Key as string;
+        if (key.endsWith(".sqlite")) {
+          const err: any = new Error("NoSuchKey");
+          err.name = "NoSuchKey";
+          err.$metadata = { httpStatusCode: 404 };
+          throw err;
+        }
+        throw new Error(`AccessDenied fetching ${key}`);
+      }
+      if (type === "ListObjectsV2Command") {
+        return { Contents: failingObjects, IsTruncated: false };
+      }
+      if (type === "PutObjectCommand") return {};
+      throw new Error(`Unexpected command: ${type}`);
+    });
+
+    const result = await reconcileKeywordIndex({
+      tenantId: ERR_TENANT,
+      knowledgeBaseId: ERR_KB_ID,
+      bucketName: ERR_BUCKET,
+      timeBudgetMs: 60_000,
+      now: () => 1_000_000,
+    });
+
+    expect(result.errorCount).toBe(60);
+    expect(result.errors).toHaveLength(50);
+    expect(result.errors[0]).toContain("doc-0.txt");
+  });
+});
+
 describe("seedTrackingFileIfMissing (via reconcileKeywordIndex)", () => {
   const SEED_TENANT = "test-tenant-seed";
   const SEED_KB_ID = "test-kb-seed";
