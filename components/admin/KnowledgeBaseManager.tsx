@@ -284,18 +284,24 @@ export default function KnowledgeBaseManager() {
   const KEYWORD_JOB_POLL_INTERVAL_MS = 5000;
 
   async function pollKeywordSyncJob() {
-    const res = await fetch("/api/admin/kb/sync/keyword-status");
-    if (!res.ok) {
-      setIsPollingKeywordJob(false);
-      return;
-    }
+    try {
+      const res = await fetch("/api/admin/kb/sync/keyword-status");
+      if (!res.ok) {
+        setIsPollingKeywordJob(false);
+        return;
+      }
 
-    const { job } = (await res.json()) as { job: KeywordSyncJob | null };
-    setKeywordSyncJob(job);
+      const { job } = (await res.json()) as { job: KeywordSyncJob | null };
+      setKeywordSyncJob(job);
 
-    if (job && (job.status === "queued" || job.status === "running")) {
-      setTimeout(pollKeywordSyncJob, KEYWORD_JOB_POLL_INTERVAL_MS);
-    } else {
+      if (job && (job.status === "queued" || job.status === "running")) {
+        setTimeout(pollKeywordSyncJob, KEYWORD_JOB_POLL_INTERVAL_MS);
+      } else {
+        setIsPollingKeywordJob(false);
+      }
+    } catch {
+      // Network failure, malformed JSON, etc. - same recovery as the !res.ok
+      // path: stop polling rather than leaving the Sync button stuck.
       setIsPollingKeywordJob(false);
     }
   }
