@@ -9,26 +9,43 @@
     "resolveJsonModule": true,
     "skipLibCheck": true,
     "strict": true,
+    // better-sqlite3 ships no inline types (unlike the @aws-sdk/* packages,
+    // which bundle their own) - it needs a separate @types/better-sqlite3
+    // package, resolved through TypeScript's typeRoots mechanism, which is
+    // completely separate from `paths` below (paths only redirects explicit
+    // import specifiers; it does not affect how TS auto-discovers @types
+    // packages for untyped JS modules). Confirmed live: without this,
+    // better-sqlite3's real module IS found via the `paths` wildcard, but
+    // its declaration file still isn't (TS7016), even though
+    // node_modules/@types/better-sqlite3 genuinely exists on disk.
+    "typeRoots": ["./node_modules/@types"],
     "paths": {
       // kb-keyword-index.ts (pre-existing, pulled in via `include` below)
       // uses the root app's "@/*" alias for a couple of its own imports
       // (rag-types, bedrock-kb) - the worker's tsconfig has no reason to
       // know about that alias otherwise, since it isn't a Next.js app.
       "@/*": ["../../*"],
-      // Forces every file in this compilation - both the worker's own
-      // handler.ts/db-client.ts AND app/lib/db/client.ts /
-      // keyword-sync-jobs.ts pulled in below - to resolve these two
-      // packages to the SAME physical install (this directory's own
-      // node_modules, installed later in this step). Without this,
-      // TypeScript's ordinary per-file directory-walk-up resolution finds
-      // two separate physical copies (this worker's own npm install vs.
-      // the repo root's), and treats DynamoDBDocumentClient's private
-      // fields as making them nominally incompatible types - a real tsc
-      // error (confirmed live), not a hypothetical one, even though at
-      // actual runtime inside the deployed container there's only ever
-      // one node_modules and no such mismatch exists.
-      "@aws-sdk/lib-dynamodb": ["./node_modules/@aws-sdk/lib-dynamodb"],
-      "@aws-sdk/client-dynamodb": ["./node_modules/@aws-sdk/client-dynamodb"]
+      // Forces EVERY bare package import in this compilation - not just
+      // this worker's own handler.ts/db-client.ts, but also
+      // app/lib/kb-keyword-index.ts, app/lib/bedrock-kb.ts,
+      // app/lib/db/client.ts, app/lib/db/keyword-sync-jobs.ts, all pulled
+      // in below despite living outside this directory - to resolve to
+      // this directory's own node_modules specifically, not whatever
+      // TypeScript's ordinary per-file directory-walk-up would otherwise
+      // find. Two concrete, confirmed-live failure modes this fixes:
+      // (1) a copied file like app/lib/kb-keyword-index.ts sits outside
+      // this worker directory's own ancestor chain entirely (confirmed in
+      // the Docker build context specifically: /build/app/lib/*.ts has no
+      // node_modules anywhere in its own directory-walk-up path at all,
+      // since only /build/lambda/kb-keyword-sync-worker/node_modules
+      // exists) - real "Cannot find module" errors, not hypothetical.
+      // (2) even where an ordinary walk-up WOULD find something (e.g. on
+      // a dev machine where the repo root's own node_modules also has
+      // most of these packages installed for the main Next.js app), a
+      // duplicate physical copy of a class-based package like
+      // @aws-sdk/lib-dynamodb still makes TypeScript treat its private
+      // fields as nominally incompatible types.
+      "*": ["./node_modules/*"]
     }
   },
   "include": [
