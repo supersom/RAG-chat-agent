@@ -121,10 +121,10 @@ describe("kb-keyword-sync-worker handler", () => {
   it("passes the Lambda's actual remaining time (minus the safety margin) as timeBudgetMs to reconcileKeywordIndex", async () => {
     mockedReconcile.mockResolvedValue(reconcileResult({ partial: false }));
 
-    await handler(sqsEvent(message), mockContext(120_000), noopCallback);
+    await handler(sqsEvent(message), mockContext(500_000), noopCallback);
 
     expect(mockedReconcile).toHaveBeenCalledWith(
-      expect.objectContaining({ timeBudgetMs: 90_000 }), // 120_000 - 30_000 margin
+      expect.objectContaining({ timeBudgetMs: 300_000 }), // 500_000 - 200_000 margin
     );
   });
 
@@ -132,8 +132,8 @@ describe("kb-keyword-sync-worker handler", () => {
     mockedReconcile.mockResolvedValue(reconcileResult({ partial: true }));
 
     await expect(
-      // 35_000 - 30_000 margin = 5_000, below MIN_ROUND_BUDGET_MS
-      handler(sqsEvent(message), mockContext(35_000), noopCallback),
+      // 205_000 - 200_000 margin = 5_000, below MIN_ROUND_BUDGET_MS
+      handler(sqsEvent(message), mockContext(205_000), noopCallback),
     ).rejects.toThrow("Ran out of safe time");
 
     const statuses = mockedPut.mock.calls.map(([job]) => job.status);
@@ -143,24 +143,25 @@ describe("kb-keyword-sync-worker handler", () => {
 
   it("stops looping mid-job once the remaining time runs out, keeping the work already checkpointed by the completed rounds", async () => {
     mockedReconcile.mockResolvedValue(reconcileResult({ partial: true }));
-    let remainingMs = 100_000;
+    let remainingMs = 600_000;
     const draining = {
       getRemainingTimeInMillis: () => {
         const current = remainingMs;
-        remainingMs -= 40_000;
+        remainingMs -= 250_000;
         return current;
       },
     } as Context;
 
-    // Rounds see 100s then 60s remaining (70s/30s budgets); the third check
-    // sees 20s, i.e. a -10s budget, so it stops instead of starting a round.
+    // Rounds see 600s then 350s remaining (400s/150s budgets after the 200s
+    // margin); the third check sees 100s remaining, i.e. a -100s budget, so
+    // it stops instead of starting a round.
     await expect(handler(sqsEvent(message), draining, noopCallback)).rejects.toThrow(
       "Ran out of safe time",
     );
 
     expect(mockedReconcile).toHaveBeenCalledTimes(2);
     expect(mockedReconcile.mock.calls.map(([params]) => params.timeBudgetMs)).toEqual([
-      70_000, 30_000,
+      400_000, 150_000,
     ]);
   });
 

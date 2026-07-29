@@ -11,11 +11,19 @@ type JobMessage = {
   mode: "full" | "incremental";
 };
 
-// Headroom for the final S3 upload (the whole SQLite file, not just the
-// object-loop work) plus Lambda's own shutdown/freeze overhead - measured
-// worst case for this tenant's current index size was 60-180s for
-// download+upload alone, so this stays conservative relative to that.
-const SAFETY_MARGIN_MS = 30_000;
+// reconcileKeywordIndex's own timeBudgetMs only governs its per-object loop
+// - the download that precedes it and the checkpoint upload that follows it
+// both happen OUTSIDE that budget window entirely, so this margin must cover
+// BOTH, not just one. Real wall-clock cost of one reconcileKeywordIndex call
+// is therefore download + timeBudgetMs + upload, and must fit inside
+// context.getRemainingTimeInMillis() at the moment the round starts.
+// Measured worst case for this tenant's current index size was 60-180s for
+// download+upload combined - this stays comfortably above that, with real
+// margin for corpus growth, not just "conservative" in name. (A prior
+// version of this constant was 30_000, which the comment claimed was
+// conservative relative to 60-180s while the number contradicted it - fixed
+// after a whole-branch review caught the mismatch.)
+const SAFETY_MARGIN_MS = 200_000;
 // Below this remaining budget, don't even start another reconcileKeywordIndex
 // round - let SQS redeliver the message to a fresh invocation (fresh 600s)
 // instead of starting work that can't possibly make meaningful progress
