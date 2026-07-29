@@ -67,7 +67,13 @@ resource "aws_s3_bucket_public_access_block" "pool_source" {
 }
 
 locals {
-  kb_upload_cors_origin = "https://worktree-auth-multitenancy-guardrails.d2l47euepvccx6.amplifyapp.com"
+  # Origin the admin UI's direct browser-to-S3 presigned PUT uploads run
+  # from. Previously pointed at a since-deleted worktree preview deployment
+  # (auth-multitenancy-guardrails branch) - never updated to the production
+  # custom domain after merge, which silently broke "Upload selected" with
+  # a generic browser "Failed to fetch" (a CORS-blocked PUT, not a server
+  # error - fetch() doesn't distinguish the two in its error message).
+  kb_upload_cors_origin = "https://kbsearch.somdutta.com"
 }
 
 resource "aws_s3_bucket_cors_configuration" "kb1_source" {
