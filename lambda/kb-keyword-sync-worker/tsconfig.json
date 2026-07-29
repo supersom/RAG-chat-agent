@@ -1,0 +1,42 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "outDir": "dist",
+    "rootDir": "../..",
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "paths": {
+      // kb-keyword-index.ts (pre-existing, pulled in via `include` below)
+      // uses the root app's "@/*" alias for a couple of its own imports
+      // (rag-types, bedrock-kb) - the worker's tsconfig has no reason to
+      // know about that alias otherwise, since it isn't a Next.js app.
+      "@/*": ["../../*"],
+      // Forces every file in this compilation - both the worker's own
+      // handler.ts/db-client.ts AND app/lib/db/client.ts /
+      // keyword-sync-jobs.ts pulled in below - to resolve these two
+      // packages to the SAME physical install (this directory's own
+      // node_modules, installed later in this step). Without this,
+      // TypeScript's ordinary per-file directory-walk-up resolution finds
+      // two separate physical copies (this worker's own npm install vs.
+      // the repo root's), and treats DynamoDBDocumentClient's private
+      // fields as making them nominally incompatible types - a real tsc
+      // error (confirmed live), not a hypothetical one, even though at
+      // actual runtime inside the deployed container there's only ever
+      // one node_modules and no such mismatch exists.
+      "@aws-sdk/lib-dynamodb": ["./node_modules/@aws-sdk/lib-dynamodb"],
+      "@aws-sdk/client-dynamodb": ["./node_modules/@aws-sdk/client-dynamodb"]
+    }
+  },
+  "include": [
+    "handler.ts",
+    "db-client.ts",
+    "pdfjs-worker-types.d.ts",
+    "../../app/lib/kb-keyword-index.ts",
+    "../../app/lib/db/keyword-sync-jobs.ts",
+    "../../app/lib/db/client.ts"
+  ]
+}
