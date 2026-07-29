@@ -1401,6 +1401,25 @@ describe("POST /api/admin/kb/sync", () => {
       expect(mockedSendKeywordSyncJob).not.toHaveBeenCalled();
       expect(data.keywordIndex).toBeNull();
     });
+
+    it("reports keywordIndexError and still returns a successful vectorSync when sendKeywordSyncJob throws", async () => {
+      mockedSendKeywordSyncJob.mockRejectedValue(new Error("SQS unavailable"));
+
+      const res = await POST(makeRequest());
+      const data = await res.json();
+
+      expect(data.keywordIndexError).toBe("SQS unavailable");
+      expect(data.keywordIndex).toBeNull();
+      expect(data.vectorSync.submittedCount).toBe(1);
+    });
+
+    it("never writes a queued job record when sendKeywordSyncJob throws, so the tenant isn't permanently stuck", async () => {
+      mockedSendKeywordSyncJob.mockRejectedValue(new Error("SQS unavailable"));
+
+      await POST(makeRequest());
+
+      expect(mockedPutKeywordSyncJob).not.toHaveBeenCalled();
+    });
   });
 
   describe("shared time budget between trackTenantObjects and vector sync", () => {
@@ -1546,7 +1565,7 @@ export async function POST(req: Request) {
       console.error("Vector sync failed:", err);
       vectorSyncError = err instanceof Error ? err.message : "Vector sync failed";
     }
-    return NextResponse.json({ keywordIndex: null, vectorSync, vectorSyncError });
+    return NextResponse.json({ keywordIndex: null, keywordIndexError: null, vectorSync, vectorSyncError });
   }
 
   const requestStartedAt = Date.now();
@@ -1599,35 +1618,49 @@ export async function POST(req: Request) {
 
   let keywordIndex: { status: "queued" | "running" } | null = null;
   if (!tenant.disableKeywordSearch) {
-    const existingJob = await getKeywordSyncJob(tenant.tenantId);
-    if (existingJob && (existingJob.status === "queued" || existingJob.status === "running")) {
-      keywordIndex = { status: existingJob.status };
-    } else {
-      await putKeywordSyncJob({
-        tenantId: tenant.tenantId,
-        status: "queued",
-        mode,
-        startedAt: new Date().toISOString(),
-        finishedAt: null,
-        listedObjectCount: 0,
-        changedObjectCount: 0,
-        unchangedObjectCount: 0,
-        deletedObjectCount: 0,
-        indexedObjectCount: 0,
-        indexedChunkCount: 0,
-        skippedObjectCount: 0,
-        errorCount: 0,
-        errors: [],
-        failureMessage: null,
-      });
-      await sendKeywordSyncJob({
-        tenantId: tenant.tenantId,
-        knowledgeBaseId: tenant.knowledgeBaseId,
-        bucketName: dataSource.bucketName,
-        region: tenant.awsRegion,
-        mode,
-      });
-      keywordIndex = { status: "queued" };
+    try {
+      const existingJob = await getKeywordSyncJob(tenant.tenantId);
+      if (existingJob && (existingJob.status === "queued" || existingJob.status === "running")) {
+        keywordIndex = { status: existingJob.status };
+      } else {
+        // Send before persisting the "queued" record, not after: if
+        // sendKeywordSyncJob throws (SQS misconfigured, transient AWS
+        // failure), there must be no DB row claiming a job is queued when
+        // no message actually reached the queue - the dedup check above
+        // would otherwise skip every future request for this tenant
+        // forever, since nothing would ever move that row past "queued".
+        await sendKeywordSyncJob({
+          tenantId: tenant.tenantId,
+          knowledgeBaseId: tenant.knowledgeBaseId,
+          bucketName: dataSource.bucketName,
+          region: tenant.awsRegion,
+          mode,
+        });
+        await putKeywordSyncJob({
+          tenantId: tenant.tenantId,
+          status: "queued",
+          mode,
+          startedAt: new Date().toISOString(),
+          finishedAt: null,
+          listedObjectCount: 0,
+          changedObjectCount: 0,
+          unchangedObjectCount: 0,
+          deletedObjectCount: 0,
+          indexedObjectCount: 0,
+          indexedChunkCount: 0,
+          skippedObjectCount: 0,
+          errorCount: 0,
+          errors: [],
+          failureMessage: null,
+        });
+        keywordIndex = { status: "queued" };
+      }
+    } catch (err) {
+      // Matches the try/catch pattern already used for trackTenantObjects
+      // and submitVectorSync above - a failure here must not crash the
+      // whole response and discard an already-successful vectorSync result.
+      console.error("Failed to enqueue keyword-index sync:", err);
+      keywordIndexError = err instanceof Error ? err.message : "Failed to enqueue keyword-index sync";
     }
   }
 
@@ -1636,6 +1669,8 @@ export async function POST(req: Request) {
 ```
 
 Note: `usesTrackingFile: true` is now hardcoded (not `Boolean(tenant.disableKeywordSearch)`) since `trackTenantObjects` always produces the diff now — `submitVectorSync` always reads/writes the small dedicated tracking file, never the large keyword-index file, regardless of whether keyword search is enabled.
+
+**Revised after task review (see the ledger):** the original version above had no error handling around the enqueue block at all - a thrown `sendKeywordSyncJob` (e.g. a transient SQS failure) would crash the whole response with a 500, discarding an already-successful `vectorSync` result computed a few lines earlier. Worse, the original ordering wrote the `"queued"` DB record *before* sending to SQS, so a send failure after a successful write left a permanent phantom `"queued"` row - the dedup check would then skip enqueueing for that tenant forever, since nothing would ever move it past `"queued"`. Fixed by sending first (so a failure never leaves a stale record) and wrapping the whole block in try/catch, matching the pattern already used for `trackTenantObjects`/`submitVectorSync` in the same function. The resume-only branch's response also gained an explicit `keywordIndexError: null` for response-shape consistency (it was silently absent from that branch's JSON before, `undefined` rather than `null`).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
