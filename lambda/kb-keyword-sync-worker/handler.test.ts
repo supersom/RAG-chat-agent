@@ -1,6 +1,23 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { Context } from "aws-lambda";
 
+const sendMock = vi.fn();
+const clientConfigs: any[] = [];
+vi.mock("@aws-sdk/client-sqs", () => ({
+  SQSClient: class {
+    send = sendMock;
+    constructor(config: any) {
+      clientConfigs.push(config);
+    }
+  },
+  SendMessageCommand: class {
+    input: any;
+    constructor(input: any) {
+      this.input = input;
+    }
+  },
+}));
+
 vi.mock("../../app/lib/kb-keyword-index", () => ({
   reconcileKeywordIndex: vi.fn(),
 }));
@@ -69,6 +86,10 @@ describe("kb-keyword-sync-worker handler", () => {
     mockedReconcile.mockReset();
     mockedPut.mockReset();
     mockedPut.mockResolvedValue(undefined);
+    sendMock.mockReset();
+    sendMock.mockResolvedValue({});
+    clientConfigs.length = 0;
+    process.env.KB_KEYWORD_SYNC_QUEUE_URL = "https://sqs.us-east-2.amazonaws.com/123/kb-keyword-sync";
   });
 
   it("writes a running record, calls reconcileKeywordIndex once when it finishes non-partial, then writes complete", async () => {
@@ -92,6 +113,7 @@ describe("kb-keyword-sync-worker handler", () => {
     const finalJob = mockedPut.mock.calls[1][0];
     expect(finalJob.indexedObjectCount).toBe(2);
     expect(finalJob.finishedAt).not.toBeNull();
+    expect(sendMock).not.toHaveBeenCalled();
   });
 
   it("keeps calling reconcileKeywordIndex until partial is false", async () => {
@@ -137,17 +159,20 @@ describe("kb-keyword-sync-worker handler", () => {
     expect(mockedReconcile).toHaveBeenCalledWith(expect.objectContaining({ mode: "full" }));
   });
 
-  it("leaves the job running (not failed) and rethrows when remaining time drops below the minimum round budget, so SQS redelivers", async () => {
+  it("leaves the job running and sends a continuation when remaining time drops below the minimum round budget", async () => {
     mockedReconcile.mockResolvedValue(reconcileResult({ partial: true }));
 
-    await expect(
-      // 205_000 - 200_000 margin = 5_000, below MIN_ROUND_BUDGET_MS
-      handler(sqsEvent(message), mockContext(205_000), noopCallback),
-    ).rejects.toThrow("Ran out of safe time");
+    // 205_000 - 200_000 margin = 5_000, below MIN_ROUND_BUDGET_MS
+    await handler(sqsEvent(message), mockContext(205_000), noopCallback);
 
     const statuses = mockedPut.mock.calls.map(([job]) => job.status);
     expect(statuses).toEqual(["running"]); // never reaches "failed" or "complete"
     expect(mockedReconcile).not.toHaveBeenCalled();
+    expect(sendMock).toHaveBeenCalledTimes(1);
+    const [{ input }] = sendMock.mock.calls[0];
+    expect(input.QueueUrl).toBe("https://sqs.us-east-2.amazonaws.com/123/kb-keyword-sync");
+    expect(JSON.parse(input.MessageBody)).toEqual(message);
+    expect(clientConfigs[0].region).toBe("us-east-2");
   });
 
   it("stops looping mid-job once the remaining time runs out, keeping the work already checkpointed by the completed rounds", async () => {
@@ -163,15 +188,16 @@ describe("kb-keyword-sync-worker handler", () => {
 
     // Rounds see 600s then 350s remaining (400s/150s budgets after the 200s
     // margin); the third check sees 100s remaining, i.e. a -100s budget, so
-    // it stops instead of starting a round.
-    await expect(handler(sqsEvent(message), draining, noopCallback)).rejects.toThrow(
-      "Ran out of safe time",
-    );
+    // it sends a continuation instead of starting a round.
+    await handler(sqsEvent(message), draining, noopCallback);
 
     expect(mockedReconcile).toHaveBeenCalledTimes(2);
     expect(mockedReconcile.mock.calls.map(([params]) => params.timeBudgetMs)).toEqual([
       400_000, 150_000,
     ]);
+    expect(sendMock).toHaveBeenCalledTimes(1);
+    const statuses = mockedPut.mock.calls.map(([job]) => job.status);
+    expect(statuses).toEqual(["running"]);
   });
 
   it("reports the job's real start time on the terminal record, not the time it finished", async () => {

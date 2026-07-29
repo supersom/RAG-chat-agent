@@ -23,8 +23,8 @@ FROM public.ecr.aws/lambda/nodejs:20 AS build
 RUN dnf install -y python3 gcc gcc-c++ make && dnf clean all
 
 WORKDIR /build
-COPY lambda/kb-keyword-sync-worker/package.json lambda/kb-keyword-sync-worker/
-RUN npm install --prefix lambda/kb-keyword-sync-worker
+COPY lambda/kb-keyword-sync-worker/package.json lambda/kb-keyword-sync-worker/package-lock.json lambda/kb-keyword-sync-worker/
+RUN npm ci --prefix lambda/kb-keyword-sync-worker
 
 # better-sqlite3@13 ships "gypfile": false - npm install never triggers a
 # node-gyp build at all, it just uses whichever prebuilt binary from its own

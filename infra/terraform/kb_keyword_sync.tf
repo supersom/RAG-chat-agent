@@ -87,7 +87,7 @@ resource "aws_iam_role_policy" "kb_keyword_sync_worker" {
       {
         Sid      = "ConsumeKeywordSyncQueue"
         Effect   = "Allow"
-        Action   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
+        Action   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes", "sqs:SendMessage"]
         Resource = [aws_sqs_queue.kb_keyword_sync.arn]
       },
     ]
@@ -154,6 +154,7 @@ resource "aws_lambda_function" "kb_keyword_sync_worker" {
   environment {
     variables = {
       DYNAMODB_KEYWORD_SYNC_JOBS_TABLE = aws_dynamodb_table.keyword_sync_jobs.name
+      KB_KEYWORD_SYNC_QUEUE_URL        = aws_sqs_queue.kb_keyword_sync.url
     }
   }
 

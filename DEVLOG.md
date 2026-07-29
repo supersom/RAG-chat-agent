@@ -1,5 +1,13 @@
 # Dev Log
 
+## 2026-07-29 - Keyword-index checkpoints no longer burn SQS retry attempts
+
+**Context:** Production full keyword-index syncs were repeatedly stopping around the first checkpoint instead of continuing to completion. The worker intentionally threw when it ran out of safe Lambda time, relying on SQS redelivery as the normal continuation mechanism. That made successful checkpoints look like failed receives, so the message hit the queue's maxReceiveCount and moved to the DLQ while the DynamoDB job stayed stuck at `running`.
+
+**Fix:** Changed the worker to enqueue an explicit continuation message after a safe partial checkpoint and return success for the current SQS record. Real reconcile failures still write a `failed` job. Added the SQS client dependency, unit coverage for continuation behavior, and Terraform wiring so the worker has the queue URL plus `sqs:SendMessage` permission.
+
+**Verification:** `npx vitest run lambda/kb-keyword-sync-worker/handler.test.ts`, `npx vitest run app/lib/kb-keyword-index.test.ts lambda/kb-keyword-sync-worker/handler.test.ts`, `npx tsc --noEmit`, worker `npm run build`, `terraform fmt -check infra/terraform/kb_keyword_sync.tf`, targeted Terraform apply for worker IAM/env, Docker image build with native SQLite/PDF smoke tests, ECR push, and Lambda update to image digest `sha256:cf4ed0fa9a100a7c700bcb33dd591771845c6885f536cb131255b3a4a07be07c`. Cleaned stale stuck state by deleting the partial S3 checkpoint, stale DynamoDB job row, and specific DLQ messages for the affected tenant/KB.
+
 ## 2026-07-29 - Full sync now reprocesses unchanged keyword-index documents
 
 **Context:** After the PDF worker fix went live, a remaining semantic gap showed up in the admin "Full sync" flow: the click carried `mode: "full"` through vector-sync submission, but the async keyword-index worker still called `reconcileKeywordIndex` with its implicit incremental behavior. That meant a document already marked as tracked in the SQLite `documents` table, but missing chunks because of an older extraction bug, would still be skipped unless its S3 metadata changed.

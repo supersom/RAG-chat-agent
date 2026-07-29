@@ -1,4 +1,5 @@
 import type { SQSEvent, SQSHandler, Context } from "aws-lambda";
+import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 import { reconcileKeywordIndex } from "../../app/lib/kb-keyword-index";
 import { putKeywordSyncJob, KeywordSyncJob } from "../../app/lib/db/keyword-sync-jobs";
 import { workerDbClient } from "./db-client";
@@ -25,16 +26,39 @@ type JobMessage = {
 // after a whole-branch review caught the mismatch.)
 const SAFETY_MARGIN_MS = 200_000;
 // Below this remaining budget, don't even start another reconcileKeywordIndex
-// round - let SQS redeliver the message to a fresh invocation (fresh 600s)
-// instead of starting work that can't possibly make meaningful progress
-// before this invocation's own deadline.
+// round - enqueue an explicit continuation for a fresh invocation instead of
+// starting work that can't possibly make meaningful progress before this
+// invocation's own deadline.
 const MIN_ROUND_BUDGET_MS = 10_000;
 
-// Distinct from a real reconcileKeywordIndex failure - this signals "ran out
-// of safe time in this invocation, needs another one," not "this job is
-// broken." Caught separately in processMessage so it does NOT get written
-// to DynamoDB as status: "failed".
-class TimeBudgetExhaustedError extends Error {}
+function regionFromQueueUrl(queueUrl: string): string | undefined {
+  return queueUrl.match(/^https:\/\/sqs\.([^.]+)\.amazonaws\.com\//)?.[1];
+}
+
+function continuationQueueUrl(): string {
+  const queueUrl = process.env.KB_KEYWORD_SYNC_QUEUE_URL;
+  if (!queueUrl) {
+    throw new Error("KB_KEYWORD_SYNC_QUEUE_URL is not configured");
+  }
+  return queueUrl;
+}
+
+function continuationQueueClient(queueUrl: string): SQSClient {
+  return new SQSClient({
+    region: regionFromQueueUrl(queueUrl) || process.env.AWS_REGION || "us-east-1",
+  });
+}
+
+async function sendContinuation(message: JobMessage): Promise<void> {
+  const queueUrl = continuationQueueUrl();
+  const client = continuationQueueClient(queueUrl);
+  await client.send(
+    new SendMessageCommand({
+      QueueUrl: queueUrl,
+      MessageBody: JSON.stringify(message),
+    }),
+  );
+}
 
 function emptyJob(message: JobMessage, status: KeywordSyncJob["status"]): KeywordSyncJob {
   return {
@@ -64,12 +88,11 @@ async function processMessage(message: JobMessage, context: Context): Promise<vo
 
   let result;
   try {
-    do {
+    while (true) {
       const remainingMs = context.getRemainingTimeInMillis() - SAFETY_MARGIN_MS;
       if (remainingMs < MIN_ROUND_BUDGET_MS) {
-        throw new TimeBudgetExhaustedError(
-          "Ran out of safe time in this invocation; SQS will redeliver to continue",
-        );
+        await sendContinuation(message);
+        return;
       }
       result = await reconcileKeywordIndex({
         tenantId: message.tenantId,
@@ -79,18 +102,11 @@ async function processMessage(message: JobMessage, context: Context): Promise<vo
         timeBudgetMs: remainingMs,
         mode: message.mode,
       });
-    } while (result.partial);
-  } catch (err) {
-    if (err instanceof TimeBudgetExhaustedError) {
-      // Leave the job "running" (already written above) and rethrow so this
-      // Lambda invocation fails for this record - SQS redelivers it (up to
-      // maxReceiveCount, see kb_keyword_sync.tf), and a fresh invocation's
-      // reconcileKeywordIndex call resumes from its own internal checkpoint
-      // (already uploaded to S3 by the last completed round within THIS
-      // invocation's do-while loop), rather than this being treated as a
-      // genuine job failure.
-      throw err;
+      if (!result.partial) {
+        break;
+      }
     }
+  } catch (err) {
     await putKeywordSyncJob(
       {
         ...emptyJob(message, "failed"),

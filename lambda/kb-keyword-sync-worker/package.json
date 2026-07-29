@@ -10,6 +10,7 @@
     "@aws-sdk/client-bedrock-agent": "^3.1097.0",
     "@aws-sdk/client-dynamodb": "^3.1093.0",
     "@aws-sdk/client-s3": "^3.1094.0",
+    "@aws-sdk/client-sqs": "3.1097.0",
     "@aws-sdk/lib-dynamodb": "^3.1093.0",
     "@thednp/dommatrix": "^3.0.4",
     "better-sqlite3": "^12.11.1",
