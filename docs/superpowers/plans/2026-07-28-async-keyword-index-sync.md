@@ -1857,8 +1857,22 @@ const [isKeywordIndexSyncing, setIsKeywordIndexSyncing] = useState(false);
 with:
 ```typescript
 const [keywordSyncJob, setKeywordSyncJob] = useState<KeywordSyncJob | null>(null);
+// Enqueue-time failures (e.g. sendKeywordSyncJob throwing) never produce a
+// job row at all - trackTenantObjects has always written a diff-scoped
+// keywordIndexError for that case, so there's nothing for /keyword-status to
+// ever poll and surface. Kept separate from keywordSyncJob.failureMessage,
+// which covers a job that WAS enqueued and later failed inside the worker -
+// two structurally different failure points, not the same error.
+const [keywordEnqueueError, setKeywordEnqueueError] = useState<string | null>(null);
 const [isSyncing, setIsSyncing] = useState(false);
-const isPollingKeywordJobRef = useRef(false);
+// State, not a ref, deliberately - matches the existing isVectorSyncPolling
+// pattern in this same file. A ref's mutation doesn't trigger a re-render,
+// so if this were a ref, clearing it after a failed /keyword-status poll
+// would leave `syncing` (computed below) permanently true from the user's
+// point of view - the Sync button would stay stuck on "Syncing..." with no
+// visible recovery, since nothing else in the component happens to trigger
+// a re-render afterward.
+const [isPollingKeywordJob, setIsPollingKeywordJob] = useState(false);
 ```
 
 - [ ] **Step 2: Replace the resume-chaining `runSync` with an enqueue-then-poll flow**
@@ -1871,7 +1885,7 @@ const KEYWORD_JOB_POLL_INTERVAL_MS = 5000;
 async function pollKeywordSyncJob() {
   const res = await fetch("/api/admin/kb/sync/keyword-status");
   if (!res.ok) {
-    isPollingKeywordJobRef.current = false;
+    setIsPollingKeywordJob(false);
     return;
   }
 
@@ -1881,13 +1895,13 @@ async function pollKeywordSyncJob() {
   if (job && (job.status === "queued" || job.status === "running")) {
     setTimeout(pollKeywordSyncJob, KEYWORD_JOB_POLL_INTERVAL_MS);
   } else {
-    isPollingKeywordJobRef.current = false;
+    setIsPollingKeywordJob(false);
   }
 }
 
 function startPollingKeywordSyncJob() {
-  if (isPollingKeywordJobRef.current) return;
-  isPollingKeywordJobRef.current = true;
+  if (isPollingKeywordJob) return;
+  setIsPollingKeywordJob(true);
   pollKeywordSyncJob();
 }
 
@@ -1909,6 +1923,7 @@ async function runSync(mode: SyncMode) {
 
     const {
       keywordIndex: newKeywordIndex,
+      keywordIndexError: newKeywordIndexError,
       vectorSync: newVectorSync,
       vectorSyncError: newVectorSyncError,
     } = await res.json();
@@ -1921,7 +1936,13 @@ async function runSync(mode: SyncMode) {
       }
     }
 
-    if (newKeywordIndex) {
+    // newKeywordIndexError means the enqueue attempt itself failed (e.g. SQS
+    // unavailable) - no job was ever created, so there's nothing to poll for.
+    // Surface it directly instead of starting a poll loop that would never
+    // find anything.
+    if (newKeywordIndexError) {
+      setKeywordEnqueueError(newKeywordIndexError);
+    } else if (newKeywordIndex) {
       startPollingKeywordSyncJob();
     }
   } catch {
@@ -1937,6 +1958,7 @@ async function handleSync(mode: SyncMode) {
   setVectorSync(null);
   setVectorSyncError(null);
   setKeywordSyncJob(null);
+  setKeywordEnqueueError(null);
   submittedKeysRef.current = new Set();
   setIsSyncing(true);
   try {
@@ -1947,10 +1969,10 @@ async function handleSync(mode: SyncMode) {
 }
 ```
 
-Update the `syncing` computed value (remove `isKeywordIndexSyncing`, it no longer exists):
+Update the `syncing` computed value (remove `isKeywordIndexSyncing`, it no longer exists; `isPollingKeywordJobRef.current` becomes `isPollingKeywordJob`, now real state):
 ```typescript
 const syncing =
-  isSyncing || isVectorSyncSubmitting || isVectorSyncPolling || isPollingKeywordJobRef.current;
+  isSyncing || isVectorSyncSubmitting || isVectorSyncPolling || isPollingKeywordJob;
 ```
 
 - [ ] **Step 3: Update the render section**
@@ -1988,12 +2010,19 @@ Replace the `keywordIndex`/`keywordIndexError` rendering block (originally aroun
     Keyword index update failed: {keywordSyncJob.failureMessage}
   </p>
 )}
+{keywordEnqueueError && (
+  <p className="text-sm text-destructive">
+    Keyword index sync failed to start: {keywordEnqueueError}
+  </p>
+)}
 ```
+
+**Revised after task review (see the ledger):** the version above (already incorporated into the code blocks so far) fixes two Important findings from the first review pass. (1) The original brief dropped `keywordIndexError` from `runSync`'s destructured POST response entirely - a real regression, since a failed enqueue (e.g. `sendKeywordSyncJob` throwing) leaves no job row at all for `/keyword-status` to ever surface, and the old UI *did* render this error before this task. Fixed with the new `keywordEnqueueError` state above, kept deliberately separate from `keywordSyncJob.failureMessage` since they're two structurally different failure points (enqueue-time vs. worker-run-time). (2) `isPollingKeywordJobRef` (a `useRef`) meant a poll-fetch failure (`!res.ok` in `pollKeywordSyncJob`) cleared the flag without triggering a re-render, leaving the Sync button stuck showing "Syncing..." indefinitely with no user-visible recovery. Fixed by switching to real `useState` (`isPollingKeywordJob`), matching the file's own already-established `isVectorSyncPolling` pattern for exactly this reason.
 
 - [ ] **Step 4: Verify**
 
 Run: `npx tsc --noEmit && npx next lint && npx next build`
-Expected: all clean. Fix any type errors from the rename (search the file for remaining `keywordIndex`/`keywordIndexError`/`isKeywordIndexSyncing` references and update them).
+Expected: all clean. Fix any type errors from the rename (search the file for remaining `keywordIndex`(state)/`keywordIndexError`(state)/`isKeywordIndexSyncing`/`isPollingKeywordJobRef` references and update them — `keywordIndex`/`keywordIndexError` as destructured *API response field names* inside `runSync` are correct and expected, only the old *state variables* of those names should be gone).
 
 - [ ] **Step 5: Commit**
 
