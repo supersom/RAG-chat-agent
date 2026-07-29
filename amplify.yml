@@ -17,6 +17,8 @@ frontend:
         - echo "DYNAMODB_TENANTS_TABLE=$DYNAMODB_TENANTS_TABLE" >> .env.production
         - echo "DYNAMODB_USERS_TABLE=$DYNAMODB_USERS_TABLE" >> .env.production
         - echo "DYNAMODB_ACTIVITY_TABLE=$DYNAMODB_ACTIVITY_TABLE" >> .env.production
+        - echo "DYNAMODB_KEYWORD_SYNC_JOBS_TABLE=$DYNAMODB_KEYWORD_SYNC_JOBS_TABLE" >> .env.production
+        - echo "KB_KEYWORD_SYNC_QUEUE_URL=$KB_KEYWORD_SYNC_QUEUE_URL" >> .env.production
         - echo "KNOWLEDGE_BASE_ID=$KNOWLEDGE_BASE_ID" >> .env.production
         - echo "NEXT_PUBLIC_APP_ENV=$NEXT_PUBLIC_APP_ENV" >> .env.production
         - echo "NEXT_PUBLIC_KNOWLEDGE_BASE_ID=$NEXT_PUBLIC_KNOWLEDGE_BASE_ID" >> .env.production
