@@ -42,6 +42,15 @@ describe("GET /api/admin/kb/sync/keyword-status", () => {
     expect(data.job).toBeNull();
   });
 
+  it("rejects non-admin sessions", async () => {
+    mockedAuth.mockResolvedValue({ user: { role: "end_user", tenantId: "acme" } } as never);
+
+    const res = await GET(new Request("http://localhost/api/admin/kb/sync/keyword-status"));
+
+    expect(res.status).toBe(403);
+    expect(mockedGetKeywordSyncJob).not.toHaveBeenCalled();
+  });
+
   it("rejects unauthenticated requests", async () => {
     mockedAuth.mockResolvedValue(null as never);
 
