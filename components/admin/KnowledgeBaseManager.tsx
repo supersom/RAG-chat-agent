@@ -89,8 +89,22 @@ export default function KnowledgeBaseManager() {
   const submittedKeysRef = useRef<Set<string>>(new Set());
   const isVectorSyncSubmittingRef = useRef(false);
   const [keywordSyncJob, setKeywordSyncJob] = useState<KeywordSyncJob | null>(null);
+  // Enqueue-time failures (e.g. sendKeywordSyncJob throwing) never produce a
+  // job row at all - trackTenantObjects has always written a diff-scoped
+  // keywordIndexError for that case, so there's nothing for /keyword-status to
+  // ever poll and surface. Kept separate from keywordSyncJob.failureMessage,
+  // which covers a job that WAS enqueued and later failed inside the worker -
+  // two structurally different failure points, not the same error.
+  const [keywordEnqueueError, setKeywordEnqueueError] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
-  const isPollingKeywordJobRef = useRef(false);
+  // State, not a ref, deliberately - matches the existing isVectorSyncPolling
+  // pattern in this same file. A ref's mutation doesn't trigger a re-render,
+  // so if this were a ref, clearing it after a failed /keyword-status poll
+  // would leave `syncing` (computed below) permanently true from the user's
+  // point of view - the Sync button would stay stuck on "Syncing..." with no
+  // visible recovery, since nothing else in the component happens to trigger
+  // a re-render afterward.
+  const [isPollingKeywordJob, setIsPollingKeywordJob] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
 
 
@@ -272,7 +286,7 @@ export default function KnowledgeBaseManager() {
   async function pollKeywordSyncJob() {
     const res = await fetch("/api/admin/kb/sync/keyword-status");
     if (!res.ok) {
-      isPollingKeywordJobRef.current = false;
+      setIsPollingKeywordJob(false);
       return;
     }
 
@@ -282,13 +296,13 @@ export default function KnowledgeBaseManager() {
     if (job && (job.status === "queued" || job.status === "running")) {
       setTimeout(pollKeywordSyncJob, KEYWORD_JOB_POLL_INTERVAL_MS);
     } else {
-      isPollingKeywordJobRef.current = false;
+      setIsPollingKeywordJob(false);
     }
   }
 
   function startPollingKeywordSyncJob() {
-    if (isPollingKeywordJobRef.current) return;
-    isPollingKeywordJobRef.current = true;
+    if (isPollingKeywordJob) return;
+    setIsPollingKeywordJob(true);
     pollKeywordSyncJob();
   }
 
@@ -310,6 +324,7 @@ export default function KnowledgeBaseManager() {
 
       const {
         keywordIndex: newKeywordIndex,
+        keywordIndexError: newKeywordIndexError,
         vectorSync: newVectorSync,
         vectorSyncError: newVectorSyncError,
       } = await res.json();
@@ -322,7 +337,13 @@ export default function KnowledgeBaseManager() {
         }
       }
 
-      if (newKeywordIndex) {
+      // newKeywordIndexError means the enqueue attempt itself failed (e.g. SQS
+      // unavailable) - no job was ever created, so there's nothing to poll for.
+      // Surface it directly instead of starting a poll loop that would never
+      // find anything.
+      if (newKeywordIndexError) {
+        setKeywordEnqueueError(newKeywordIndexError);
+      } else if (newKeywordIndex) {
         startPollingKeywordSyncJob();
       }
     } catch {
@@ -335,6 +356,7 @@ export default function KnowledgeBaseManager() {
     setVectorSync(null);
     setVectorSyncError(null);
     setKeywordSyncJob(null);
+    setKeywordEnqueueError(null);
     submittedKeysRef.current = new Set();
     setIsSyncing(true);
     try {
@@ -345,7 +367,7 @@ export default function KnowledgeBaseManager() {
   }
 
   const syncing =
-    isSyncing || isVectorSyncSubmitting || isVectorSyncPolling || isPollingKeywordJobRef.current;
+    isSyncing || isVectorSyncSubmitting || isVectorSyncPolling || isPollingKeywordJob;
   const failedDocumentCount =
     vectorSync?.documents.filter((doc) => doc.status === "FAILED").length ?? 0;
 
@@ -465,6 +487,11 @@ export default function KnowledgeBaseManager() {
           {keywordSyncJob?.status === "failed" && keywordSyncJob.failureMessage && (
             <p className="text-sm text-destructive">
               Keyword index update failed: {keywordSyncJob.failureMessage}
+            </p>
+          )}
+          {keywordEnqueueError && (
+            <p className="text-sm text-destructive">
+              Keyword index sync failed to start: {keywordEnqueueError}
             </p>
           )}
           {vectorSync && (
