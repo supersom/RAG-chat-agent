@@ -13,24 +13,36 @@ vi.mock("@/app/lib/bedrock-kb", () => ({
 }));
 
 vi.mock("@/app/lib/kb-keyword-index", () => ({
-  reconcileKeywordIndex: vi.fn(),
   trackTenantObjects: vi.fn(),
   submitVectorSync: vi.fn(),
   DEFAULT_VECTOR_SYNC_TIME_BUDGET_MS: 15_000,
 }));
 
+vi.mock("@/app/lib/kb-sync-queue", () => ({
+  sendKeywordSyncJob: vi.fn(),
+}));
+
+vi.mock("@/app/lib/db/keyword-sync-jobs", () => ({
+  getKeywordSyncJob: vi.fn(),
+  putKeywordSyncJob: vi.fn(),
+}));
+
 import { auth } from "@/auth";
 import { getTenant } from "@/app/lib/db/tenants";
 import { getKbDataSource } from "@/app/lib/bedrock-kb";
-import { reconcileKeywordIndex, trackTenantObjects, submitVectorSync } from "@/app/lib/kb-keyword-index";
+import { trackTenantObjects, submitVectorSync } from "@/app/lib/kb-keyword-index";
+import { sendKeywordSyncJob } from "@/app/lib/kb-sync-queue";
+import { getKeywordSyncJob, putKeywordSyncJob } from "@/app/lib/db/keyword-sync-jobs";
 import { POST } from "./route";
 
 const mockedAuth = vi.mocked(auth);
 const mockedGetTenant = vi.mocked(getTenant);
 const mockedGetKbDataSource = vi.mocked(getKbDataSource);
-const mockedReconcile = vi.mocked(reconcileKeywordIndex);
 const mockedTrackTenantObjects = vi.mocked(trackTenantObjects);
 const mockedSubmitVectorSync = vi.mocked(submitVectorSync);
+const mockedSendKeywordSyncJob = vi.mocked(sendKeywordSyncJob);
+const mockedGetKeywordSyncJob = vi.mocked(getKeywordSyncJob);
+const mockedPutKeywordSyncJob = vi.mocked(putKeywordSyncJob);
 
 function makeRequest(body?: Record<string, unknown>): Request {
   return new Request("http://localhost/api/admin/kb/sync", {
@@ -40,6 +52,10 @@ function makeRequest(body?: Record<string, unknown>): Request {
   });
 }
 
+// Matches trackTenantObjects's real return type exactly (app/lib/kb-keyword-index.ts)
+// - listedObjectCount, listedKeys, changedKeys, deletedKeys, partial. No
+// indexBucket/mode/indexedObjectCount/etc. - those are reconcileKeywordIndex-only
+// fields and reconcileKeywordIndex doesn't run in this route anymore.
 function diffResult(overrides: Partial<{
   listedKeys: string[];
   changedKeys: string[];
@@ -47,18 +63,7 @@ function diffResult(overrides: Partial<{
   partial: boolean;
 }> = {}) {
   return {
-    indexBucket: "pooled-bucket",
-    indexKey: "index-key",
-    mode: "reconcile" as const,
     listedObjectCount: 1,
-    changedObjectCount: 1,
-    unchangedObjectCount: 0,
-    deletedObjectCount: 0,
-    indexedObjectCount: 1,
-    indexedChunkCount: 1,
-    skippedObjectCount: 0,
-    errorCount: 0,
-    errors: [],
     partial: false,
     listedKeys: ["tenants/acme/a.pdf"],
     changedKeys: ["tenants/acme/a.pdf"],
@@ -71,9 +76,11 @@ beforeEach(() => {
   mockedAuth.mockReset();
   mockedGetTenant.mockReset();
   mockedGetKbDataSource.mockReset();
-  mockedReconcile.mockReset();
   mockedTrackTenantObjects.mockReset();
   mockedSubmitVectorSync.mockReset();
+  mockedSendKeywordSyncJob.mockReset();
+  mockedGetKeywordSyncJob.mockReset();
+  mockedPutKeywordSyncJob.mockReset();
 
   mockedAuth.mockResolvedValue({
     user: { role: "admin", tenantId: "acme" },
@@ -82,7 +89,6 @@ beforeEach(() => {
     dataSourceId: "ds-1",
     bucketName: "pooled-bucket",
   } as never);
-  mockedReconcile.mockResolvedValue(diffResult() as never);
   mockedTrackTenantObjects.mockResolvedValue(diffResult() as never);
   mockedSubmitVectorSync.mockResolvedValue({
     submittedCount: 1,
@@ -94,12 +100,27 @@ beforeEach(() => {
     tenantId: "acme",
     knowledgeBaseId: "kb-acme",
     awsRegion: "us-east-2",
+    disableKeywordSearch: false,
   } as never);
+  mockedSendKeywordSyncJob.mockResolvedValue(undefined);
+  mockedGetKeywordSyncJob.mockResolvedValue(null);
+  mockedPutKeywordSyncJob.mockResolvedValue(undefined);
 });
 
 describe("POST /api/admin/kb/sync", () => {
+  it("always calls trackTenantObjects for the vector-sync diff, regardless of disableKeywordSearch", async () => {
+    mockedGetTenant.mockResolvedValue({
+      tenantId: "acme", knowledgeBaseId: "kb-acme", awsRegion: "us-east-2", disableKeywordSearch: true,
+    } as never);
+
+    await POST(makeRequest());
+
+    expect(mockedTrackTenantObjects).toHaveBeenCalledTimes(1);
+    expect(mockedSubmitVectorSync).toHaveBeenCalledTimes(1);
+  });
+
   it("passes the diff and mode through to submitVectorSync", async () => {
-    mockedReconcile.mockResolvedValue(
+    mockedTrackTenantObjects.mockResolvedValue(
       diffResult({ listedKeys: ["a", "b"], changedKeys: ["b"] }) as never,
     );
 
@@ -109,7 +130,7 @@ describe("POST /api/admin/kb/sync", () => {
     expect(mockedSubmitVectorSync).toHaveBeenCalledWith(
       expect.objectContaining({
         mode: "incremental",
-        usesTrackingFile: false,
+        usesTrackingFile: true,
         diff: expect.objectContaining({ listedKeys: ["a", "b"], changedKeys: ["b"] }),
       }),
     );
@@ -126,8 +147,8 @@ describe("POST /api/admin/kb/sync", () => {
     expect(data.vectorSync).not.toBeNull();
   });
 
-  it("never touches vector sync when the diff came back partial", async () => {
-    mockedReconcile.mockResolvedValue(diffResult({ partial: true }) as never);
+  it("never touches vector sync when trackTenantObjects's diff came back partial", async () => {
+    mockedTrackTenantObjects.mockResolvedValue(diffResult({ partial: true }) as never);
 
     const res = await POST(makeRequest());
     const data = await res.json();
@@ -136,46 +157,14 @@ describe("POST /api/admin/kb/sync", () => {
     expect(data.vectorSync).toBeNull();
   });
 
-  it("still computes the object diff via trackTenantObjects when keyword search is disabled, so vector sync isn't starved", async () => {
-    mockedGetTenant.mockResolvedValue({
-      tenantId: "acme",
-      knowledgeBaseId: "kb-acme",
-      awsRegion: "us-east-2",
-      disableKeywordSearch: true,
-    } as never);
-    mockedTrackTenantObjects.mockResolvedValue(
-      diffResult({ listedKeys: ["tenants/acme/a.pdf"], changedKeys: ["tenants/acme/a.pdf"] }) as never,
-    );
-
-    const res = await POST(makeRequest());
-    const data = await res.json();
-
-    expect(mockedReconcile).not.toHaveBeenCalled();
-    expect(mockedTrackTenantObjects).toHaveBeenCalledTimes(1);
-    expect(data.keywordIndex).toBeNull();
-    expect(mockedSubmitVectorSync).toHaveBeenCalledWith(
-      expect.objectContaining({ usesTrackingFile: true }),
-    );
-    expect(data.vectorSync.submittedCount).toBe(1);
-  });
-
-  it("does not run vector sync (or trackTenantObjects) on a keyword-index-only resume", async () => {
-    await POST(makeRequest({ resumeKeywordIndexOnly: true }));
-
-    expect(mockedSubmitVectorSync).not.toHaveBeenCalled();
-  });
-
-  it("resumes vector sync directly, skipping keyword-index/diff work entirely, on a vector-sync-only resume", async () => {
+  it("resumes vector sync directly, skipping the diff step entirely, on a vector-sync-only resume", async () => {
     const res = await POST(makeRequest({ resumeVectorSyncOnly: true, mode: "full" }));
     const data = await res.json();
 
-    expect(mockedReconcile).not.toHaveBeenCalled();
     expect(mockedTrackTenantObjects).not.toHaveBeenCalled();
     expect(mockedSubmitVectorSync).toHaveBeenCalledWith(
       expect.objectContaining({ mode: "full" }),
     );
-    // No diff is passed on a resume - submitVectorSync continues its own
-    // checkpointed queue instead of re-seeding.
     expect(mockedSubmitVectorSync.mock.calls[0][0]).not.toHaveProperty("diff");
     expect(data.keywordIndex).toBeNull();
     expect(data.vectorSync).not.toBeNull();
@@ -190,7 +179,50 @@ describe("POST /api/admin/kb/sync", () => {
     expect(mockedSubmitVectorSync).not.toHaveBeenCalled();
   });
 
-  describe("shared time budget between reconcile and vector sync", () => {
+  describe("keyword-index enqueueing", () => {
+    it("enqueues a keyword-sync job when keyword search is enabled and none is already in flight", async () => {
+      const res = await POST(makeRequest());
+      const data = await res.json();
+
+      expect(mockedSendKeywordSyncJob).toHaveBeenCalledWith(
+        expect.objectContaining({ tenantId: "acme", knowledgeBaseId: "kb-acme" }),
+      );
+      expect(mockedPutKeywordSyncJob).toHaveBeenCalledWith(
+        expect.objectContaining({ tenantId: "acme", status: "queued" }),
+      );
+      expect(data.keywordIndex).toEqual({ status: "queued" });
+    });
+
+    it("does not enqueue a second job when one is already queued or running", async () => {
+      mockedGetKeywordSyncJob.mockResolvedValue({
+        tenantId: "acme", status: "running", mode: "incremental", startedAt: "x", finishedAt: null,
+        listedObjectCount: 0, changedObjectCount: 0, unchangedObjectCount: 0, deletedObjectCount: 0,
+        indexedObjectCount: 0, indexedChunkCount: 0, skippedObjectCount: 0, errorCount: 0, errors: [],
+        failureMessage: null,
+      } as never);
+
+      const res = await POST(makeRequest());
+      const data = await res.json();
+
+      expect(mockedSendKeywordSyncJob).not.toHaveBeenCalled();
+      expect(mockedPutKeywordSyncJob).not.toHaveBeenCalled();
+      expect(data.keywordIndex).toEqual({ status: "running" });
+    });
+
+    it("does not enqueue anything when the tenant has keyword search disabled", async () => {
+      mockedGetTenant.mockResolvedValue({
+        tenantId: "acme", knowledgeBaseId: "kb-acme", awsRegion: "us-east-2", disableKeywordSearch: true,
+      } as never);
+
+      const res = await POST(makeRequest());
+      const data = await res.json();
+
+      expect(mockedSendKeywordSyncJob).not.toHaveBeenCalled();
+      expect(data.keywordIndex).toBeNull();
+    });
+  });
+
+  describe("shared time budget between trackTenantObjects and vector sync", () => {
     const originalEnv = process.env.KB_SYNC_TOTAL_BUDGET_MS;
 
     afterEach(() => {
@@ -199,27 +231,23 @@ describe("POST /api/admin/kb/sync", () => {
       else process.env.KB_SYNC_TOTAL_BUDGET_MS = originalEnv;
     });
 
-    it("never gives submitVectorSync more than its own tuned default, even when reconcile finished instantly", async () => {
+    it("never gives submitVectorSync more than its own tuned default, even when trackTenantObjects finished instantly", async () => {
       process.env.KB_SYNC_TOTAL_BUDGET_MS = "22000";
       vi.spyOn(Date, "now").mockReturnValue(1_000_000);
 
       await POST(makeRequest());
 
-      // Total budget (22s) minus ~0 elapsed would be 22s, but that's more
-      // than submitVectorSync's own live-verified-safe 15s default - the
-      // route must cap at the smaller of the two, not just hand over
-      // whatever's left of the shared budget.
       expect(mockedSubmitVectorSync).toHaveBeenCalledWith(
         expect.objectContaining({ timeBudgetMs: 15_000 }),
       );
     });
 
-    it("reduces submitVectorSync's timeBudgetMs by however long reconcileKeywordIndex actually took", async () => {
+    it("reduces submitVectorSync's timeBudgetMs by however long trackTenantObjects actually took", async () => {
       process.env.KB_SYNC_TOTAL_BUDGET_MS = "22000";
       let now = 1_000_000;
       vi.spyOn(Date, "now").mockImplementation(() => now);
-      mockedReconcile.mockImplementation(async () => {
-        now += 9_000; // simulate reconcile spending 9s of the shared budget
+      mockedTrackTenantObjects.mockImplementation(async () => {
+        now += 9_000;
         return diffResult() as never;
       });
 
@@ -230,12 +258,12 @@ describe("POST /api/admin/kb/sync", () => {
       );
     });
 
-    it("clamps submitVectorSync's timeBudgetMs to 0 instead of negative when reconcile used the whole budget", async () => {
+    it("clamps submitVectorSync's timeBudgetMs to 0 instead of negative when trackTenantObjects used the whole budget", async () => {
       process.env.KB_SYNC_TOTAL_BUDGET_MS = "22000";
       let now = 1_000_000;
       vi.spyOn(Date, "now").mockImplementation(() => now);
-      mockedReconcile.mockImplementation(async () => {
-        now += 30_000; // reconcile overran the entire shared budget
+      mockedTrackTenantObjects.mockImplementation(async () => {
+        now += 30_000;
         return diffResult() as never;
       });
 
