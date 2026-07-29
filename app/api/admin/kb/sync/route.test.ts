@@ -72,6 +72,18 @@ function diffResult(overrides: Partial<{
   };
 }
 
+// A job row the dedup check would treat as in-flight; startedAt is the only
+// field that varies between the "genuinely in progress" and "stuck" cases.
+function inFlightJob(overrides: { startedAt: string }) {
+  return {
+    tenantId: "acme", status: "running", mode: "incremental", finishedAt: null,
+    listedObjectCount: 0, changedObjectCount: 0, unchangedObjectCount: 0, deletedObjectCount: 0,
+    indexedObjectCount: 0, indexedChunkCount: 0, skippedObjectCount: 0, errorCount: 0, errors: [],
+    failureMessage: null,
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   mockedAuth.mockReset();
   mockedGetTenant.mockReset();
@@ -194,12 +206,9 @@ describe("POST /api/admin/kb/sync", () => {
     });
 
     it("does not enqueue a second job when one is already queued or running", async () => {
-      mockedGetKeywordSyncJob.mockResolvedValue({
-        tenantId: "acme", status: "running", mode: "incremental", startedAt: "x", finishedAt: null,
-        listedObjectCount: 0, changedObjectCount: 0, unchangedObjectCount: 0, deletedObjectCount: 0,
-        indexedObjectCount: 0, indexedChunkCount: 0, skippedObjectCount: 0, errorCount: 0, errors: [],
-        failureMessage: null,
-      } as never);
+      mockedGetKeywordSyncJob.mockResolvedValue(
+        inFlightJob({ startedAt: new Date(Date.now() - 60 * 1000).toISOString() }) as never,
+      );
 
       const res = await POST(makeRequest());
       const data = await res.json();
@@ -207,6 +216,21 @@ describe("POST /api/admin/kb/sync", () => {
       expect(mockedSendKeywordSyncJob).not.toHaveBeenCalled();
       expect(mockedPutKeywordSyncJob).not.toHaveBeenCalled();
       expect(data.keywordIndex).toEqual({ status: "running" });
+    });
+
+    it("re-enqueues over a stale queued/running job instead of blocking forever", async () => {
+      mockedGetKeywordSyncJob.mockResolvedValue(
+        inFlightJob({
+          // 40 min ago, past the route's 35-min staleness threshold
+          startedAt: new Date(Date.now() - 40 * 60 * 1000).toISOString(),
+        }) as never,
+      );
+
+      const res = await POST(makeRequest());
+      const data = await res.json();
+
+      expect(mockedSendKeywordSyncJob).toHaveBeenCalled();
+      expect(data.keywordIndex).toEqual({ status: "queued" });
     });
 
     it("does not enqueue anything when the tenant has keyword search disabled", async () => {

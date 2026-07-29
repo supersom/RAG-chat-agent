@@ -14,6 +14,15 @@ import { getKeywordSyncJob, putKeywordSyncJob } from "@/app/lib/db/keyword-sync-
 // against anymore.
 const DEFAULT_TOTAL_SYNC_BUDGET_MS = 22_000;
 
+// A legitimate job can take up to ~30 minutes (3 SQS redeliveries, see
+// kb_keyword_sync.tf's maxReceiveCount, x up to 10 min each, the worker's
+// own Lambda timeout) before genuinely failing into the DLQ. Anything still
+// "queued"/"running" well past that is stuck - a crash, an OOM, a DLQ'd
+// message - not legitimately in progress. Without this, the dedup check
+// below would otherwise block that tenant from ever syncing again, with no
+// recovery path short of manually deleting the DynamoDB row.
+const STALE_JOB_THRESHOLD_MS = 35 * 60 * 1000;
+
 const syncRequestSchema = z
   .object({
     mode: z.enum(["full", "incremental"]).optional(),
@@ -132,7 +141,14 @@ export async function POST(req: Request) {
   if (!tenant.disableKeywordSearch) {
     try {
       const existingJob = await getKeywordSyncJob(tenant.tenantId);
-      if (existingJob && (existingJob.status === "queued" || existingJob.status === "running")) {
+      const existingJobIsStale =
+        existingJob != null &&
+        Date.now() - new Date(existingJob.startedAt).getTime() > STALE_JOB_THRESHOLD_MS;
+      if (
+        existingJob &&
+        (existingJob.status === "queued" || existingJob.status === "running") &&
+        !existingJobIsStale
+      ) {
         keywordIndex = { status: existingJob.status };
       } else {
         // Send before persisting the "queued" record, not after: if
