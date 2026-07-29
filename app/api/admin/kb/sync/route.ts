@@ -77,7 +77,7 @@ export async function POST(req: Request) {
       console.error("Vector sync failed:", err);
       vectorSyncError = err instanceof Error ? err.message : "Vector sync failed";
     }
-    return NextResponse.json({ keywordIndex: null, vectorSync, vectorSyncError });
+    return NextResponse.json({ keywordIndex: null, keywordIndexError: null, vectorSync, vectorSyncError });
   }
 
   const requestStartedAt = Date.now();
@@ -130,35 +130,49 @@ export async function POST(req: Request) {
 
   let keywordIndex: { status: "queued" | "running" } | null = null;
   if (!tenant.disableKeywordSearch) {
-    const existingJob = await getKeywordSyncJob(tenant.tenantId);
-    if (existingJob && (existingJob.status === "queued" || existingJob.status === "running")) {
-      keywordIndex = { status: existingJob.status };
-    } else {
-      await putKeywordSyncJob({
-        tenantId: tenant.tenantId,
-        status: "queued",
-        mode,
-        startedAt: new Date().toISOString(),
-        finishedAt: null,
-        listedObjectCount: 0,
-        changedObjectCount: 0,
-        unchangedObjectCount: 0,
-        deletedObjectCount: 0,
-        indexedObjectCount: 0,
-        indexedChunkCount: 0,
-        skippedObjectCount: 0,
-        errorCount: 0,
-        errors: [],
-        failureMessage: null,
-      });
-      await sendKeywordSyncJob({
-        tenantId: tenant.tenantId,
-        knowledgeBaseId: tenant.knowledgeBaseId,
-        bucketName: dataSource.bucketName,
-        region: tenant.awsRegion,
-        mode,
-      });
-      keywordIndex = { status: "queued" };
+    try {
+      const existingJob = await getKeywordSyncJob(tenant.tenantId);
+      if (existingJob && (existingJob.status === "queued" || existingJob.status === "running")) {
+        keywordIndex = { status: existingJob.status };
+      } else {
+        // Send before persisting the "queued" record, not after: if
+        // sendKeywordSyncJob throws (SQS misconfigured, transient AWS
+        // failure), there must be no DB row claiming a job is queued when
+        // no message actually reached the queue - the dedup check above
+        // would otherwise skip every future request for this tenant
+        // forever, since nothing would ever move that row past "queued".
+        await sendKeywordSyncJob({
+          tenantId: tenant.tenantId,
+          knowledgeBaseId: tenant.knowledgeBaseId,
+          bucketName: dataSource.bucketName,
+          region: tenant.awsRegion,
+          mode,
+        });
+        await putKeywordSyncJob({
+          tenantId: tenant.tenantId,
+          status: "queued",
+          mode,
+          startedAt: new Date().toISOString(),
+          finishedAt: null,
+          listedObjectCount: 0,
+          changedObjectCount: 0,
+          unchangedObjectCount: 0,
+          deletedObjectCount: 0,
+          indexedObjectCount: 0,
+          indexedChunkCount: 0,
+          skippedObjectCount: 0,
+          errorCount: 0,
+          errors: [],
+          failureMessage: null,
+        });
+        keywordIndex = { status: "queued" };
+      }
+    } catch (err) {
+      // Matches the try/catch pattern already used for trackTenantObjects
+      // and submitVectorSync above - a failure here must not crash the
+      // whole response and discard an already-successful vectorSync result.
+      console.error("Failed to enqueue keyword-index sync:", err);
+      keywordIndexError = err instanceof Error ? err.message : "Failed to enqueue keyword-index sync";
     }
   }
 

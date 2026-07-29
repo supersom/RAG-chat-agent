@@ -220,6 +220,25 @@ describe("POST /api/admin/kb/sync", () => {
       expect(mockedSendKeywordSyncJob).not.toHaveBeenCalled();
       expect(data.keywordIndex).toBeNull();
     });
+
+    it("reports keywordIndexError and still returns a successful vectorSync when sendKeywordSyncJob throws", async () => {
+      mockedSendKeywordSyncJob.mockRejectedValue(new Error("SQS unavailable"));
+
+      const res = await POST(makeRequest());
+      const data = await res.json();
+
+      expect(data.keywordIndexError).toBe("SQS unavailable");
+      expect(data.keywordIndex).toBeNull();
+      expect(data.vectorSync.submittedCount).toBe(1);
+    });
+
+    it("never writes a queued job record when sendKeywordSyncJob throws, so the tenant isn't permanently stuck", async () => {
+      mockedSendKeywordSyncJob.mockRejectedValue(new Error("SQS unavailable"));
+
+      await POST(makeRequest());
+
+      expect(mockedPutKeywordSyncJob).not.toHaveBeenCalled();
+    });
   });
 
   describe("shared time budget between trackTenantObjects and vector sync", () => {
