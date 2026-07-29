@@ -39,6 +39,26 @@ COPY app/lib/db/keyword-sync-jobs.ts app/lib/db/client.ts app/lib/db/
 RUN cd lambda/kb-keyword-sync-worker && npx tsc -p tsconfig.json
 RUN npm prune --omit=dev --prefix lambda/kb-keyword-sync-worker
 
+# server-only is a Next.js-only guard package (throws when imported outside
+# a React Server Component) that kb-keyword-index.ts imports for its
+# legitimate purpose in the Next.js app. tsc does not resolution-check
+# side-effect-only imports at compile time, so this only surfaces as a real
+# "Cannot find module 'server-only'" crash at actual container runtime -
+# confirmed live by running the built image, not assumed. A harmless no-op
+# stub (NOT the real npm package, which deliberately throws outside an RSC
+# context) satisfies the require() without a bundler or path-rewriting tool.
+# Injected after npm prune, not before: it isn't a declared dependency, so
+# prune would otherwise remove it as extraneous.
+RUN mkdir -p lambda/kb-keyword-sync-worker/node_modules/server-only && \
+    printf '{"name":"server-only","version":"0.0.0","main":"index.js"}' > lambda/kb-keyword-sync-worker/node_modules/server-only/package.json && \
+    printf '// no-op stub for the worker Lambda - see docs/superpowers/plans/2026-07-28-async-keyword-index-sync.md\n' > lambda/kb-keyword-sync-worker/node_modules/server-only/index.js
+
+# Proves the handler can actually load, not just compile - this is exactly
+# the check that was missing before the final whole-branch review caught
+# two separate unresolvable requires (server-only, @/app/lib/bedrock-kb)
+# that `tsc --noEmit` and `docker build` alone both passed cleanly through.
+RUN node -e 'require("./lambda/kb-keyword-sync-worker/dist/lambda/kb-keyword-sync-worker/handler.js")'
+
 # tsc's rootDir ("../..", i.e. the repo root) makes it mirror the full
 # source path under dist/ - verified directly (not assumed): compiling this
 # exact layout produces dist/lambda/kb-keyword-sync-worker/handler.js and

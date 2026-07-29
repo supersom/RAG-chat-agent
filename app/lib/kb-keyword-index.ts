@@ -11,12 +11,18 @@ import {
   ListObjectsV2Command,
   PutObjectCommand,
 } from "@aws-sdk/client-s3";
-import type { RAGSource } from "@/app/lib/rag-types";
+// Relative, not the "@/" alias: this file is also compiled into the
+// kb-keyword-sync-worker Lambda, where path aliases are compile-time-only -
+// tsc never rewrites emitted require() specifiers, so an aliased import
+// resolves under `tsc --noEmit` and then throws "Cannot find module
+// '@/app/lib/bedrock-kb'" at real container runtime. Confirmed live by
+// running the built image, not assumed.
+import type { RAGSource } from "./rag-types";
 import {
   ingestKnowledgeBaseDocuments,
   deleteKnowledgeBaseDocuments,
   type DocumentSyncResult,
-} from "@/app/lib/bedrock-kb";
+} from "./bedrock-kb";
 
 const DEFAULT_REGION = "us-east-2";
 const DEFAULT_INDEX_PREFIX = ".customer-support-agent/keyword-indexes";
