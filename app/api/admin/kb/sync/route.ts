@@ -114,6 +114,11 @@ export async function POST(req: Request) {
       knowledgeBaseId: tenant.knowledgeBaseId,
       bucketName: dataSource.bucketName,
       region: tenant.awsRegion,
+      // Only defer to the async worker's own tracking-file seed when that
+      // worker will actually run this round - otherwise (keyword search
+      // disabled) nothing would ever resolve the deferral, and vector sync
+      // would stall for this tenant forever instead of just once.
+      deferIfKeywordIndexExists: !tenant.disableKeywordSearch,
     });
   } catch (err) {
     console.error("Tenant object tracking failed:", err);

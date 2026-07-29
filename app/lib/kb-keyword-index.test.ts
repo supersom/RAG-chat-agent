@@ -13,6 +13,9 @@ vi.mock("@aws-sdk/client-s3", () => ({
   GetObjectCommand: vi.fn().mockImplementation(function (input) {
     return { __type: "GetObjectCommand", input };
   }),
+  HeadObjectCommand: vi.fn().mockImplementation(function (input) {
+    return { __type: "HeadObjectCommand", input };
+  }),
   ListObjectsV2Command: vi.fn().mockImplementation(function (input) {
     return { __type: "ListObjectsV2Command", input };
   }),
@@ -1018,6 +1021,16 @@ describe("seedTrackingFileIfMissing (via reconcileKeywordIndex)", () => {
         }
         return { Body: Buffer.from("refund policy handbook materiality", "utf8") };
       }
+      if (type === "HeadObjectCommand") {
+        const key = command.input.Key as string;
+        if (!store[slotFor(key)]) {
+          const err: any = new Error("NotFound");
+          err.name = "NotFound";
+          err.$metadata = { httpStatusCode: 404 };
+          throw err;
+        }
+        return {};
+      }
       if (type === "ListObjectsV2Command") {
         const prefix = (command.input.Prefix as string) || "";
         return {
@@ -1165,6 +1178,69 @@ describe("seedTrackingFileIfMissing (via reconcileKeywordIndex)", () => {
 
     expect(s3.trackingPutCount()).toBe(0);
     expect(s3.trackingBody()).toBe(before);
+  });
+
+  // These two tests cover the real production call order, not just the
+  // seed function in isolation: app/api/admin/kb/sync/route.ts calls
+  // trackTenantObjects BEFORE the async worker (which runs
+  // reconcileKeywordIndex, containing the seed step) ever gets a chance to
+  // run. Without deferIfKeywordIndexExists, trackTenantObjects would create
+  // an empty tracking file itself, right here, before the seed ever fires -
+  // permanently defeating it. This is what deferIfKeywordIndexExists exists
+  // to prevent.
+  it("defers (partial: true) instead of creating an empty tracking file, when deferIfKeywordIndexExists is set and a keyword-index file already exists", async () => {
+    const s3 = mockS3({ trackingExists: false });
+
+    // One reconcileKeywordIndex round: uploads a real keyword-index file
+    // with the one object's row in its documents table. Crucially, this
+    // round's OWN seed check ran too early (documents table was still empty
+    // when it checked) and did not seed the tracking file - reproducing
+    // the exact state a tenant is in immediately after this branch ships:
+    // real keyword-index history exists, no tracking file has ever been
+    // written.
+    await reconcileKeywordIndex({
+      tenantId: SEED_TENANT, knowledgeBaseId: SEED_KB_ID, bucketName: SEED_BUCKET,
+      timeBudgetMs: 60_000, now: () => 1_000_000,
+    });
+    expect(s3.trackingPutCount()).toBe(0);
+
+    const diff = await trackTenantObjects({
+      tenantId: SEED_TENANT,
+      knowledgeBaseId: SEED_KB_ID,
+      bucketName: SEED_BUCKET,
+      deferIfKeywordIndexExists: true,
+    });
+
+    expect(diff.partial).toBe(true);
+    expect(diff.changedKeys).toEqual([]);
+    // The whole point: trackTenantObjects must not create/upload an empty
+    // tracking file itself here - that would permanently defeat the async
+    // worker's own seed step, which hasn't run yet.
+    expect(s3.trackingPutCount()).toBe(0);
+  });
+
+  it("falls back to the old mark-everything-changed behavior when deferIfKeywordIndexExists is not set, even if a keyword-index file exists", async () => {
+    const s3 = mockS3({ trackingExists: false });
+
+    await reconcileKeywordIndex({
+      tenantId: SEED_TENANT, knowledgeBaseId: SEED_KB_ID, bucketName: SEED_BUCKET,
+      timeBudgetMs: 60_000, now: () => 1_000_000,
+    });
+
+    // deferIfKeywordIndexExists intentionally omitted - matches a tenant
+    // with keyword search disabled, where no async job will ever run to
+    // resolve a deferral, so deferring here would stall vector-sync
+    // forever instead of just once. This tenant gets the old, already-
+    // accepted one-time re-embed behavior instead.
+    const diff = await trackTenantObjects({
+      tenantId: SEED_TENANT,
+      knowledgeBaseId: SEED_KB_ID,
+      bucketName: SEED_BUCKET,
+    });
+
+    expect(diff.partial).toBe(false);
+    expect(diff.changedKeys).toEqual([SEED_KEY]);
+    expect(s3.trackingPutCount()).toBe(1);
   });
 });
 

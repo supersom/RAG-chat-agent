@@ -131,6 +131,30 @@ describe("POST /api/admin/kb/sync", () => {
     expect(mockedSubmitVectorSync).toHaveBeenCalledTimes(1);
   });
 
+  it("tells trackTenantObjects to defer to the async worker's seed step only when keyword search is enabled (the worker will actually run)", async () => {
+    mockedGetTenant.mockResolvedValue({
+      tenantId: "acme", knowledgeBaseId: "kb-acme", awsRegion: "us-east-2", disableKeywordSearch: false,
+    } as never);
+
+    await POST(makeRequest());
+
+    expect(mockedTrackTenantObjects).toHaveBeenCalledWith(
+      expect.objectContaining({ deferIfKeywordIndexExists: true }),
+    );
+  });
+
+  it("tells trackTenantObjects NOT to defer when keyword search is disabled - no async worker will ever run to resolve a deferral", async () => {
+    mockedGetTenant.mockResolvedValue({
+      tenantId: "acme", knowledgeBaseId: "kb-acme", awsRegion: "us-east-2", disableKeywordSearch: true,
+    } as never);
+
+    await POST(makeRequest());
+
+    expect(mockedTrackTenantObjects).toHaveBeenCalledWith(
+      expect.objectContaining({ deferIfKeywordIndexExists: false }),
+    );
+  });
+
   it("passes the diff and mode through to submitVectorSync", async () => {
     mockedTrackTenantObjects.mockResolvedValue(
       diffResult({ listedKeys: ["a", "b"], changedKeys: ["b"] }) as never,

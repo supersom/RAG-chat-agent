@@ -8,6 +8,7 @@ import Database from "better-sqlite3";
 import {
   S3Client,
   GetObjectCommand,
+  HeadObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
 } from "@aws-sdk/client-s3";
@@ -116,6 +117,8 @@ type KeywordIndexParams = {
   timeBudgetMs?: number;
   now?: () => number;
   maxPdfBytes?: number;
+  // trackTenantObjects-only: see its own doc comment for why this exists.
+  deferIfKeywordIndexExists?: boolean;
 };
 
 type ReconcileRunState = {
@@ -623,6 +626,23 @@ async function downloadExistingIndex({
       throw err;
     }
     if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+  }
+}
+
+// Cheap existence check (HEAD, not GET) - deliberately does not download the
+// object's body. Used by trackTenantObjects to check whether a tenant's
+// keyword-index file exists without paying that file's real download cost
+// (60-180s for a 75MB file) synchronously inside a Next.js request - the
+// whole reason that operation had to move to an async worker in the first
+// place. See trackTenantObjects's own doc comment.
+async function objectExists(client: S3Client, bucket: string, key: string): Promise<boolean> {
+  try {
+    await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+    return true;
+  } catch (err: any) {
+    const status = err?.$metadata?.httpStatusCode;
+    if (status === 404 || err?.name === "NotFound" || err?.name === "NoSuchKey") return false;
+    throw err;
   }
 }
 
@@ -1169,12 +1189,34 @@ async function seedTrackingFileIfMissing({
 // is no FTS index to build. Cheap enough (S3 listing + lightweight SQLite
 // row writes) that it doesn't need the time-budget/checkpoint machinery
 // reconcileKeywordIndex needs for its much more expensive per-object work.
+//
+// deferIfKeywordIndexExists: pass true only when the caller is ALSO
+// enqueueing an async keyword-index job in the same request (i.e.
+// !tenant.disableKeywordSearch) - see app/api/admin/kb/sync/route.ts. When
+// this tenant has never had a tracking file before AND already has a real
+// keyword-index file (change-tracking history sitting in the wrong schema,
+// not a brand-new tenant), creating a fresh empty tracking file here would
+// make every object look "changed" and trigger a full, uncosted re-embed of
+// the whole corpus via submitVectorSync - the async worker's own
+// seedTrackingFileIfMissing (see reconcileKeywordIndex) is what performs the
+// real migration, using data it already has open locally with zero extra
+// download cost. This flag makes trackTenantObjects defer to that instead of
+// racing it: report partial (the caller's existing logic already treats a
+// partial diff as "skip vector sync this round") and do nothing else, so a
+// later sync - after the async job has actually seeded the tracking file -
+// computes the correct diff instead. Deliberately NOT the default: for a
+// tenant with keyword search disabled, no async job will ever run to
+// resolve the deferral, so deferring there would block vector-sync forever
+// instead of just once - callers where nothing will ever seed the tracking
+// file should get the old (pre-existing, already-accepted) one-time
+// re-embed behavior, not an unbounded stall.
 export async function trackTenantObjects({
   tenantId,
   knowledgeBaseId,
   bucketName,
   credentials,
   region,
+  deferIfKeywordIndexExists,
 }: KeywordIndexParams): Promise<{
   listedObjectCount: number;
   listedKeys: string[];
@@ -1186,6 +1228,13 @@ export async function trackTenantObjects({
   const client = s3Client(region, credentials);
   const dbPath = tempTrackingPath(tenantId, knowledgeBaseId);
   await downloadExistingIndex({ client, indexBucket, indexKey, dbPath });
+
+  if (!fs.existsSync(dbPath) && deferIfKeywordIndexExists) {
+    const keywordIndexLoc = keywordIndexLocation(tenantId, knowledgeBaseId, bucketName);
+    if (await objectExists(client, keywordIndexLoc.indexBucket, keywordIndexLoc.indexKey)) {
+      return { listedObjectCount: 0, listedKeys: [], changedKeys: [], deletedKeys: [], partial: true };
+    }
+  }
 
   const db = initDatabase(dbPath);
   let diff: TenantObjectDiff;
