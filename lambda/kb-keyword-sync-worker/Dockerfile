@@ -25,6 +25,23 @@ RUN dnf install -y python3 gcc gcc-c++ make && dnf clean all
 WORKDIR /build
 COPY lambda/kb-keyword-sync-worker/package.json lambda/kb-keyword-sync-worker/
 RUN npm install --prefix lambda/kb-keyword-sync-worker
+
+# better-sqlite3@13 ships "gypfile": false - npm install never triggers a
+# node-gyp build at all, it just uses whichever prebuilt binary from its own
+# bundled prebuilds/ directory matches the current platform (e.g.
+# prebuilds/linux-x64.node). Confirmed live in production, the hard way: that
+# generic prebuilt binary segfaults on Lambda's actual runtime
+# ("Runtime.ExitError", "signal: segmentation fault") despite loading fine
+# under `docker run` locally (require() alone doesn't exercise the native
+# addon's real code paths - only actually opening a database does) and
+# despite the dnf-installed python3/gcc/make toolchain above, which was
+# necessary but not sufficient since nothing was invoking it. Forcing the
+# package's own build-release script compiles a real binary against this
+# exact container's toolchain/glibc instead, which is what the comment at
+# the top of this file always intended "building it inside this image" to
+# mean.
+RUN cd lambda/kb-keyword-sync-worker/node_modules/better-sqlite3 && npm run build-release
+
 COPY lambda/kb-keyword-sync-worker/tsconfig.json lambda/kb-keyword-sync-worker/handler.ts lambda/kb-keyword-sync-worker/db-client.ts lambda/kb-keyword-sync-worker/pdfjs-worker-types.d.ts lambda/kb-keyword-sync-worker/
 # kb-keyword-index.ts imports from rag-types.ts (types only, erased at
 # runtime) and bedrock-kb.ts (real runtime values - ingestKnowledgeBaseDocuments/
@@ -53,11 +70,24 @@ RUN mkdir -p lambda/kb-keyword-sync-worker/node_modules/server-only && \
     printf '{"name":"server-only","version":"0.0.0","main":"index.js"}' > lambda/kb-keyword-sync-worker/node_modules/server-only/package.json && \
     printf '// no-op stub for the worker Lambda - see docs/superpowers/plans/2026-07-28-async-keyword-index-sync.md\n' > lambda/kb-keyword-sync-worker/node_modules/server-only/index.js
 
-# Proves the handler can actually load, not just compile - this is exactly
-# the check that was missing before the final whole-branch review caught
-# two separate unresolvable requires (server-only, @/app/lib/bedrock-kb)
-# that `tsc --noEmit` and `docker build` alone both passed cleanly through.
-RUN node -e 'require("./lambda/kb-keyword-sync-worker/dist/lambda/kb-keyword-sync-worker/handler.js")'
+# Proves the handler can actually load AND that better-sqlite3's native
+# binary actually works, not just that the module resolves - `require()`
+# alone was exactly the check that missed the build-release fix above: it
+# loads the native addon into memory fine even when the binary is
+# incompatible with this environment, and only segfaults once real SQLite
+# code actually runs. This is also the check that caught the earlier
+# server-only/@/app/lib/bedrock-kb unresolvable-require bugs, which
+# `tsc --noEmit` and `docker build` alone both passed cleanly through.
+RUN node -e ' \
+  require("./lambda/kb-keyword-sync-worker/dist/lambda/kb-keyword-sync-worker/handler.js"); \
+  const Database = require("./lambda/kb-keyword-sync-worker/node_modules/better-sqlite3"); \
+  const db = new Database(":memory:"); \
+  db.exec("CREATE TABLE t (x INTEGER)"); \
+  db.prepare("INSERT INTO t VALUES (1)").run(); \
+  if (db.prepare("SELECT x FROM t").get().x !== 1) throw new Error("better-sqlite3 smoke test failed"); \
+  db.close(); \
+  console.log("better-sqlite3 native binary OK"); \
+'
 
 # tsc's rootDir ("../..", i.e. the repo root) makes it mirror the full
 # source path under dist/ - verified directly (not assumed): compiling this
