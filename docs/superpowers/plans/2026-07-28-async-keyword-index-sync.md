@@ -558,6 +558,8 @@ git commit -m "Add KeywordSyncJobs table and client-injectable data-access modul
 - Consumes: `reconcileKeywordIndex` from `../../app/lib/kb-keyword-index` (its param object is passed inline, matching `KeywordIndexParams`' shape structurally - no explicit type import needed); `KeywordSyncJob`, `getKeywordSyncJob`, `putKeywordSyncJob` from `../../app/lib/db/keyword-sync-jobs` (Task 3).
 - Produces: `export const handler: SQSHandler` — wired to the SQS event source mapping in Task 5.
 
+**Note on step order (revised after a real BLOCKED report from Task 4's first implementation attempt, see the ledger):** the original ordering wrote the test before the worker's own `package.json`/`tsconfig.json` existed, and instructed running it via `cd lambda/kb-keyword-sync-worker && npx vitest run handler.test.ts`. Both were wrong: Vitest resolves its config from the repo root regardless of `cwd`, so that invocation never discovers the test file at all (confirmed live) — and the file is only discoverable once `vitest.config.ts`'s `test.include` covers `lambda/**/*.test.ts` in the first place. The steps below are reordered so every prerequisite exists before the step that needs it; every command runs from the **repo root**, never `cd`'d into the worker directory.
+
 - [ ] **Step 1: Role-based DynamoDB client for the worker**
 
 ```typescript
@@ -579,7 +581,123 @@ export const workerDbClient = DynamoDBDocumentClient.from(client, {
 });
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [ ] **Step 2: Add the worker's own package.json, tsconfig.json, and pdfjs-dist type shim**
+
+```json
+// lambda/kb-keyword-sync-worker/package.json
+{
+  "name": "kb-keyword-sync-worker",
+  "private": true,
+  "version": "1.0.0",
+  "main": "dist/handler.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1093.0",
+    "@aws-sdk/lib-dynamodb": "^3.1093.0",
+    "@aws-sdk/client-s3": "^3.1094.0",
+    "better-sqlite3": "^13.0.1",
+    "pdf-parse": "^2.4.5",
+    "@thednp/dommatrix": "^3.0.4"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.145",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^20",
+    "typescript": "^5"
+  }
+}
+```
+
+```json
+// lambda/kb-keyword-sync-worker/tsconfig.json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "outDir": "dist",
+    "rootDir": "../..",
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "paths": {
+      // kb-keyword-index.ts (pre-existing, pulled in via `include` below)
+      // uses the root app's "@/*" alias for a couple of its own imports
+      // (rag-types, bedrock-kb) - the worker's tsconfig has no reason to
+      // know about that alias otherwise, since it isn't a Next.js app.
+      "@/*": ["../../*"],
+      // Forces every file in this compilation - both the worker's own
+      // handler.ts/db-client.ts AND app/lib/db/client.ts /
+      // keyword-sync-jobs.ts pulled in below - to resolve these two
+      // packages to the SAME physical install (this directory's own
+      // node_modules, installed later in this step). Without this,
+      // TypeScript's ordinary per-file directory-walk-up resolution finds
+      // two separate physical copies (this worker's own npm install vs.
+      // the repo root's), and treats DynamoDBDocumentClient's private
+      // fields as making them nominally incompatible types - a real tsc
+      // error (confirmed live), not a hypothetical one, even though at
+      // actual runtime inside the deployed container there's only ever
+      // one node_modules and no such mismatch exists.
+      "@aws-sdk/lib-dynamodb": ["./node_modules/@aws-sdk/lib-dynamodb"],
+      "@aws-sdk/client-dynamodb": ["./node_modules/@aws-sdk/client-dynamodb"]
+    }
+  },
+  "include": [
+    "handler.ts",
+    "db-client.ts",
+    "pdfjs-worker-types.d.ts",
+    "../../app/lib/kb-keyword-index.ts",
+    "../../app/lib/db/keyword-sync-jobs.ts",
+    "../../app/lib/db/client.ts"
+  ]
+}
+```
+
+```typescript
+// lambda/kb-keyword-sync-worker/pdfjs-worker-types.d.ts
+//
+// kb-keyword-index.ts (pulled into this compilation via tsconfig's
+// `include`) dynamically imports this pdfjs-dist submodule path, which
+// ships no type declarations of its own. The root Next.js app's
+// moduleResolution ("bundler") tolerates this; this worker's
+// moduleResolution ("node" - the correct setting for a real Node.js Lambda
+// runtime, not a bundler-oriented one) does not, and fails with TS7016
+// under `strict` otherwise. Confirmed via a live tsc run, not assumed.
+declare module "pdfjs-dist/legacy/build/pdf.worker.mjs";
+```
+
+Install the worker's own dependencies (creates its own `node_modules`/lockfile, separate from the repo root's):
+```bash
+cd lambda/kb-keyword-sync-worker && npm install
+```
+
+Add `@types/aws-lambda` to the **root** project's devDependencies too, from the repo root (its own standalone `tsconfig.json` above is what actually governs the worker's compile, but the root project's editor/IDE experience benefits from knowing the types too):
+```bash
+npm install --save-dev @types/aws-lambda
+```
+
+- [ ] **Step 3: Exclude `lambda/` from the root tsconfig, include it in the root vitest config**
+
+The root `tsconfig.json`'s `include: ["next-env.d.ts", "**/*.ts", "**/*.tsx", ...]` has no exclusion for `lambda/`, so a plain `npx tsc --noEmit` from the repo root would try to typecheck the worker's files under the *Next.js* app's compiler options (`moduleResolution: "bundler"`, etc.) instead of the worker's own (`moduleResolution: "node"`, `module: "commonjs"`) - two different configs asserting ownership of the same files. Keep them cleanly separate instead of hoping the settings happen to agree:
+
+In `tsconfig.json` (root), change:
+```json
+  "exclude": ["node_modules"]
+```
+to:
+```json
+  "exclude": ["node_modules", "lambda"]
+```
+
+Separately, the root `vitest.config.ts`'s `test.include` (`["app/lib/**/*.test.ts", "app/api/**/*.test.ts", "scripts/**/*.test.ts"]`) doesn't match `lambda/**` either - confirmed directly, not assumed. This has to happen **before** the next step, not after: Vitest resolves its config from the repo root regardless of `cwd`, so the worker's test file is only discoverable via this include pattern - there's no way to run it (from any directory) before this change is in place.
+```typescript
+    include: ["app/lib/**/*.test.ts", "app/api/**/*.test.ts", "scripts/**/*.test.ts", "lambda/**/*.test.ts"],
+```
+
+- [ ] **Step 4: Write the failing test**
 
 ```typescript
 // lambda/kb-keyword-sync-worker/handler.test.ts
@@ -692,12 +810,15 @@ describe("kb-keyword-sync-worker handler", () => {
 });
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [ ] **Step 5: Run test to verify it fails**
 
-Run: `cd lambda/kb-keyword-sync-worker && npx vitest run handler.test.ts`
+Run (from the **repo root** — do not `cd` into the worker directory; Vitest resolves `vitest.config.ts` from the repo root regardless of `cwd`, and only the include-pattern change from Step 3 makes this file discoverable at all):
+```bash
+npx vitest run lambda/kb-keyword-sync-worker/handler.test.ts
+```
 Expected: FAIL — `Cannot find module './handler'`
 
-- [ ] **Step 4: Write the implementation**
+- [ ] **Step 6: Write the implementation**
 
 ```typescript
 // lambda/kb-keyword-sync-worker/handler.ts
@@ -794,81 +915,13 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
 };
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [ ] **Step 7: Run test to verify it passes**
 
-Run: `cd lambda/kb-keyword-sync-worker && npx vitest run handler.test.ts`
-Expected: PASS (3 tests)
-
-- [ ] **Step 6: Add the worker's own package.json and tsconfig.json**
-
-```json
-// lambda/kb-keyword-sync-worker/package.json
-{
-  "name": "kb-keyword-sync-worker",
-  "private": true,
-  "version": "1.0.0",
-  "main": "dist/handler.js",
-  "scripts": {
-    "build": "tsc -p tsconfig.json"
-  },
-  "dependencies": {
-    "@aws-sdk/client-dynamodb": "^3.1093.0",
-    "@aws-sdk/lib-dynamodb": "^3.1093.0",
-    "@aws-sdk/client-s3": "^3.1094.0",
-    "better-sqlite3": "^13.0.1",
-    "pdf-parse": "^2.4.5",
-    "@thednp/dommatrix": "^3.0.4"
-  },
-  "devDependencies": {
-    "@types/aws-lambda": "^8.10.145",
-    "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^20",
-    "typescript": "^5"
-  }
-}
-```
-
-```json
-// lambda/kb-keyword-sync-worker/tsconfig.json
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "commonjs",
-    "moduleResolution": "node",
-    "outDir": "dist",
-    "rootDir": "../..",
-    "esModuleInterop": true,
-    "resolveJsonModule": true,
-    "skipLibCheck": true,
-    "strict": true
-  },
-  "include": ["handler.ts", "db-client.ts", "../../app/lib/kb-keyword-index.ts", "../../app/lib/db/keyword-sync-jobs.ts", "../../app/lib/db/client.ts"]
-}
-```
-
-Add `@types/aws-lambda` to the root `package.json` devDependencies too, since the worker's own `tsconfig.json` (Step 6 above) is a separate, standalone config, but its editor/IDE experience benefits from the root project knowing the types too:
-
+Run (from the repo root, same as Step 5):
 ```bash
-npm install --save-dev @types/aws-lambda
+npx vitest run lambda/kb-keyword-sync-worker/handler.test.ts
 ```
-
-- [ ] **Step 7: Exclude `lambda/` from the root tsconfig, include it in the root vitest config**
-
-The root `tsconfig.json`'s `include: ["next-env.d.ts", "**/*.ts", "**/*.tsx", ...]` has no exclusion for `lambda/`, so a plain `npx tsc --noEmit` from the repo root would try to typecheck the worker's files under the *Next.js* app's compiler options (`moduleResolution: "bundler"`, etc.) instead of the worker's own (`moduleResolution: "node"`, `module: "commonjs"`) - two different configs asserting ownership of the same files. Keep them cleanly separate instead of hoping the settings happen to agree:
-
-In `tsconfig.json` (root), change:
-```json
-  "exclude": ["node_modules"]
-```
-to:
-```json
-  "exclude": ["node_modules", "lambda"]
-```
-
-Separately, the root `vitest.config.ts`'s `test.include` (`["app/lib/**/*.test.ts", "app/api/**/*.test.ts", "scripts/**/*.test.ts"]`) doesn't match `lambda/**` either - confirmed directly, not assumed, since this project's root `npx vitest run` is a real command other tasks in this plan already rely on for a "full suite" check. Add the worker's tests to it:
-```typescript
-    include: ["app/lib/**/*.test.ts", "app/api/**/*.test.ts", "scripts/**/*.test.ts", "lambda/**/*.test.ts"],
-```
+Expected: PASS (3 tests)
 
 - [ ] **Step 8: Run the full suite and typecheck, both from the repo root and standalone for the worker**
 
