@@ -96,6 +96,10 @@ export default function KnowledgeBaseManager() {
   // which covers a job that WAS enqueued and later failed inside the worker -
   // two structurally different failure points, not the same error.
   const [keywordEnqueueError, setKeywordEnqueueError] = useState<string | null>(null);
+  // trackTenantObjects's own diff failure (unrelated to whether the keyword-
+  // index job itself enqueued successfully) - surfaced so it isn't silently
+  // dropped now that it's a distinct field from keywordEnqueueError.
+  const [objectTrackingError, setObjectTrackingError] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
   // State, not a ref, deliberately - matches the existing isVectorSyncPolling
   // pattern in this same file. A ref's mutation doesn't trigger a re-render,
@@ -331,10 +335,12 @@ export default function KnowledgeBaseManager() {
       const {
         keywordIndex: newKeywordIndex,
         keywordEnqueueError: newKeywordEnqueueError,
+        objectTrackingError: newObjectTrackingError,
         vectorSync: newVectorSync,
         vectorSyncError: newVectorSyncError,
       } = await res.json();
 
+      setObjectTrackingError(newObjectTrackingError ?? null);
       setVectorSyncError(newVectorSyncError ?? null);
       if (newVectorSync) {
         trackSubmittedKeys(newVectorSync);
@@ -365,6 +371,7 @@ export default function KnowledgeBaseManager() {
     setVectorSyncError(null);
     setKeywordSyncJob(null);
     setKeywordEnqueueError(null);
+    setObjectTrackingError(null);
     submittedKeysRef.current = new Set();
     setIsSyncing(true);
     try {
@@ -500,6 +507,11 @@ export default function KnowledgeBaseManager() {
           {keywordEnqueueError && (
             <p className="text-sm text-destructive">
               Keyword index sync failed to start: {keywordEnqueueError}
+            </p>
+          )}
+          {objectTrackingError && (
+            <p className="text-sm text-destructive">
+              Sync status check failed: {objectTrackingError}
             </p>
           )}
           {vectorSync && (
