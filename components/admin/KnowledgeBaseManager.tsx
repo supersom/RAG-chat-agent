@@ -26,8 +26,12 @@ type VectorSyncStatus = {
   partial: boolean;
 };
 
-type KeywordIndexStatus = {
-  mode: "reconcile" | "skipped";
+type KeywordSyncJob = {
+  tenantId: string;
+  status: "queued" | "running" | "complete" | "failed";
+  mode: SyncMode;
+  startedAt: string;
+  finishedAt: string | null;
   listedObjectCount: number;
   changedObjectCount: number;
   unchangedObjectCount: number;
@@ -36,8 +40,8 @@ type KeywordIndexStatus = {
   indexedChunkCount: number;
   skippedObjectCount: number;
   errorCount: number;
-  partial: boolean;
   errors: string[];
+  failureMessage: string | null;
 };
 
 // Bedrock's per-document ingestion/deletion statuses that won't change on
@@ -84,10 +88,9 @@ export default function KnowledgeBaseManager() {
   // submitted in later resume rounds too, not just the first round's.
   const submittedKeysRef = useRef<Set<string>>(new Set());
   const isVectorSyncSubmittingRef = useRef(false);
-  const [keywordIndex, setKeywordIndex] = useState<KeywordIndexStatus | null>(null);
-  const [keywordIndexError, setKeywordIndexError] = useState<string | null>(null);
+  const [keywordSyncJob, setKeywordSyncJob] = useState<KeywordSyncJob | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
-  const [isKeywordIndexSyncing, setIsKeywordIndexSyncing] = useState(false);
+  const isPollingKeywordJobRef = useRef(false);
   const [syncError, setSyncError] = useState<string | null>(null);
 
 
@@ -264,20 +267,37 @@ export default function KnowledgeBaseManager() {
     }
   }
 
-  // The keyword-index reconcile is time-budgeted server-side and reports
-  // `partial: true` when it had to checkpoint instead of finishing. Keep
-  // resuming it until it reports a full pass, so a large knowledge base's
-  // first sync completes as several small requests instead of timing out as
-  // one big one. Vector sync only ever starts fresh on the initial,
-  // non-resume request - see resumeVectorSync for its own independent
-  // resume chain.
-  async function runSync(mode: SyncMode, resumeOnly: boolean) {
-    setIsKeywordIndexSyncing(true);
+  const KEYWORD_JOB_POLL_INTERVAL_MS = 5000;
+
+  async function pollKeywordSyncJob() {
+    const res = await fetch("/api/admin/kb/sync/keyword-status");
+    if (!res.ok) {
+      isPollingKeywordJobRef.current = false;
+      return;
+    }
+
+    const { job } = (await res.json()) as { job: KeywordSyncJob | null };
+    setKeywordSyncJob(job);
+
+    if (job && (job.status === "queued" || job.status === "running")) {
+      setTimeout(pollKeywordSyncJob, KEYWORD_JOB_POLL_INTERVAL_MS);
+    } else {
+      isPollingKeywordJobRef.current = false;
+    }
+  }
+
+  function startPollingKeywordSyncJob() {
+    if (isPollingKeywordJobRef.current) return;
+    isPollingKeywordJobRef.current = true;
+    pollKeywordSyncJob();
+  }
+
+  async function runSync(mode: SyncMode) {
     try {
       const res = await fetch("/api/admin/kb/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(resumeOnly ? { resumeKeywordIndexOnly: true } : { mode }),
+        body: JSON.stringify({ mode }),
       });
 
       if (!res.ok) {
@@ -290,28 +310,23 @@ export default function KnowledgeBaseManager() {
 
       const {
         keywordIndex: newKeywordIndex,
-        keywordIndexError: newKeywordIndexError,
         vectorSync: newVectorSync,
         vectorSyncError: newVectorSyncError,
       } = await res.json();
-      setKeywordIndex(newKeywordIndex ?? null);
-      setKeywordIndexError(newKeywordIndexError ?? null);
 
-      if (!resumeOnly) {
-        setVectorSyncError(newVectorSyncError ?? null);
-        if (newVectorSync) {
-          trackSubmittedKeys(newVectorSync);
-          if (newVectorSync.partial) {
-            resumeVectorSync(mode);
-          }
+      setVectorSyncError(newVectorSyncError ?? null);
+      if (newVectorSync) {
+        trackSubmittedKeys(newVectorSync);
+        if (newVectorSync.partial) {
+          resumeVectorSync(mode);
         }
       }
 
-      if (newKeywordIndex?.partial && newKeywordIndex.mode === "reconcile" && !newKeywordIndexError) {
-        await runSync(mode, true);
+      if (newKeywordIndex) {
+        startPollingKeywordSyncJob();
       }
-    } finally {
-      setIsKeywordIndexSyncing(false);
+    } catch {
+      setSyncError("Failed to start sync.");
     }
   }
 
@@ -319,19 +334,18 @@ export default function KnowledgeBaseManager() {
     setSyncError(null);
     setVectorSync(null);
     setVectorSyncError(null);
-    setKeywordIndex(null);
-    setKeywordIndexError(null);
+    setKeywordSyncJob(null);
     submittedKeysRef.current = new Set();
     setIsSyncing(true);
     try {
-      await runSync(mode, false);
+      await runSync(mode);
     } finally {
       setIsSyncing(false);
     }
   }
 
   const syncing =
-    isSyncing || isKeywordIndexSyncing || isVectorSyncSubmitting || isVectorSyncPolling;
+    isSyncing || isVectorSyncSubmitting || isVectorSyncPolling || isPollingKeywordJobRef.current;
   const failedDocumentCount =
     vectorSync?.documents.filter((doc) => doc.status === "FAILED").length ?? 0;
 
@@ -423,36 +437,34 @@ export default function KnowledgeBaseManager() {
             </Button>
           </div>
           {syncError && <p className="text-sm text-destructive">{syncError}</p>}
-          {keywordIndex && (
+          {keywordSyncJob && (
             <div className="text-sm text-muted-foreground">
               <p>
-                Keyword index: {keywordIndex.mode === "skipped" ? "no supported S3 files" : "reconciled"}
-                {keywordIndex.mode === "reconcile" &&
-                  ` (${keywordIndex.indexedObjectCount} indexed, ${keywordIndex.indexedChunkCount} chunks, ${keywordIndex.unchangedObjectCount} unchanged, ${keywordIndex.deletedObjectCount} deleted)`}
-                {keywordIndex.skippedObjectCount > 0 &&
-                  `, skipped ${keywordIndex.skippedObjectCount}`}
-                {keywordIndex.partial && ", partial scan"}
-                {keywordIndex.errorCount > 0 && `, ${keywordIndex.errorCount} errors`}
-                .
+                Keyword index: {keywordSyncJob.status}
+                {keywordSyncJob.status === "complete" &&
+                  ` (${keywordSyncJob.indexedObjectCount} indexed, ${keywordSyncJob.indexedChunkCount} chunks, ${keywordSyncJob.unchangedObjectCount} unchanged, ${keywordSyncJob.deletedObjectCount} deleted)`}
+                {keywordSyncJob.skippedObjectCount > 0 &&
+                  `, skipped ${keywordSyncJob.skippedObjectCount}`}
+                {keywordSyncJob.errorCount > 0 && `, ${keywordSyncJob.errorCount} errors`}
               </p>
-              {keywordIndex.mode === "reconcile" && (
+              {keywordSyncJob.status === "complete" && (
                 <p>
-                  Listed {keywordIndex.listedObjectCount} supported S3 objects;
-                  {` ${keywordIndex.changedObjectCount} changed or new`}.
+                  Listed {keywordSyncJob.listedObjectCount} supported S3 objects;
+                  {` ${keywordSyncJob.changedObjectCount} changed or new`}.
                 </p>
               )}
-              {keywordIndex.errors.length > 0 && (
-                <ul className="mt-2 max-h-24 list-disc overflow-y-auto pl-5 font-mono text-xs text-destructive">
-                  {keywordIndex.errors.map((error) => (
+              {keywordSyncJob.errors.length > 0 && (
+                <ul className="list-disc pl-5">
+                  {keywordSyncJob.errors.map((error) => (
                     <li key={error}>{error}</li>
                   ))}
                 </ul>
               )}
             </div>
           )}
-          {keywordIndexError && (
+          {keywordSyncJob?.status === "failed" && keywordSyncJob.failureMessage && (
             <p className="text-sm text-destructive">
-              Keyword index update failed: {keywordIndexError}
+              Keyword index update failed: {keywordSyncJob.failureMessage}
             </p>
           )}
           {vectorSync && (
