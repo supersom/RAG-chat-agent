@@ -291,6 +291,18 @@ async function ensurePdfWorkerHandler(): Promise<void> {
   // dynamic import entirely if present, so importing the worker module
   // ourselves - via a static, bundler-traceable specifier - and assigning
   // it there sidesteps the broken path resolution rather than fixing it.
+  //
+  // Written as a literal `await import(...)` deliberately - this is the
+  // form both Vitest and Next's own bundler handle correctly. The worker
+  // Lambda's own `tsc --module commonjs` build downlevels this exact line
+  // to a real `require()` of a `.mjs` file, which Node always rejects
+  // ("require() of ES Module ... not supported") - confirmed live in
+  // production, the instant any PDF was actually extracted. That's fixed
+  // by patching the *compiled* worker output post-tsc (see the worker's
+  // Dockerfile), not by rewriting this source - every workaround tried
+  // that hides the literal `import(...)` from tsc's static analysis
+  // (`new Function`, indirect `eval`) also hides it from Vitest's own
+  // module transform, breaking tests instead.
   const workerModule = await import("pdfjs-dist/legacy/build/pdf.worker.mjs");
   (globalThis as any).pdfjsWorker = { WorkerMessageHandler: workerModule.WorkerMessageHandler };
 }

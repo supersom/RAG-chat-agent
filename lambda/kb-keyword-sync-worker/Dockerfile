@@ -54,6 +54,32 @@ COPY lambda/kb-keyword-sync-worker/tsconfig.json lambda/kb-keyword-sync-worker/h
 COPY app/lib/kb-keyword-index.ts app/lib/rag-types.ts app/lib/bedrock-kb.ts app/lib/
 COPY app/lib/db/keyword-sync-jobs.ts app/lib/db/client.ts app/lib/db/
 RUN cd lambda/kb-keyword-sync-worker && npx tsc -p tsconfig.json
+
+# tsc's CommonJS output ("module": "commonjs" in tsconfig.json) downlevels
+# kb-keyword-index.ts's literal `await import("pdfjs-dist/legacy/build/
+# pdf.worker.mjs")` into `Promise.resolve().then(() => require(...))` - a
+# genuine require() of an ES Module in disguise, which Node always rejects
+# ("require() of ES Module ... not supported"). Confirmed live in
+# production: this only surfaces the instant a real PDF is actually
+# extracted, which the Dockerfile's own build-time smoke test never
+# exercised before (it only opened a `:memory:` SQLite database). Fixing
+# the *source* was tried and rejected: every trick that hides the literal
+# `import(...)` from tsc's static analysis (`new Function`, indirect
+# `eval`) also hides it from Vitest's own module transform, breaking the
+# test suite - both use the same mechanism (static detection of a literal
+# import() expression) to work correctly, just for opposite outputs. Node
+# itself has no problem executing a genuine `import(...)` expression
+# directly inside a CommonJS .js file at runtime (only *static* import/
+# export declarations are ESM-only) - so patching tsc's compiled output
+# back to what the source actually said is safe and precise: it targets
+# the exact downleveled pattern verbatim, not a general find/replace, and
+# fails the build loudly if that pattern isn't found rather than silently
+# doing nothing.
+RUN cd /build/lambda/kb-keyword-sync-worker && \
+    grep -q 'await Promise.resolve().then(() => __importStar(require("pdfjs-dist/legacy/build/pdf.worker.mjs")))' dist/app/lib/kb-keyword-index.js && \
+    sed -i 's|await Promise.resolve().then(() => __importStar(require("pdfjs-dist/legacy/build/pdf.worker.mjs")))|await import("pdfjs-dist/legacy/build/pdf.worker.mjs")|' dist/app/lib/kb-keyword-index.js && \
+    ! grep -q 'require("pdfjs-dist/legacy/build/pdf.worker.mjs")' dist/app/lib/kb-keyword-index.js
+
 RUN npm prune --omit=dev --prefix lambda/kb-keyword-sync-worker
 
 # server-only is a Next.js-only guard package (throws when imported outside
@@ -78,15 +104,33 @@ RUN mkdir -p lambda/kb-keyword-sync-worker/node_modules/server-only && \
 # code actually runs. This is also the check that caught the earlier
 # server-only/@/app/lib/bedrock-kb unresolvable-require bugs, which
 # `tsc --noEmit` and `docker build` alone both passed cleanly through.
+#
+# Also exercises extractText() on a real (minimal, hand-built, but valid)
+# PDF - closing the exact gap that let the pdf.worker.mjs require()-of-ESM
+# bug (see the sed fixup above) ship undetected: nothing before this ever
+# called extractText() at build time, only better-sqlite3. The PDF is
+# inlined as base64 rather than COPYing a fixture file, to keep this
+# self-contained; verified independently (outside Docker) that pdf-parse
+# extracts "Hello PDF" from these exact bytes before relying on it here.
 RUN node -e ' \
-  require("./lambda/kb-keyword-sync-worker/dist/lambda/kb-keyword-sync-worker/handler.js"); \
-  const Database = require("./lambda/kb-keyword-sync-worker/node_modules/better-sqlite3"); \
-  const db = new Database(":memory:"); \
-  db.exec("CREATE TABLE t (x INTEGER)"); \
-  db.prepare("INSERT INTO t VALUES (1)").run(); \
-  if (db.prepare("SELECT x FROM t").get().x !== 1) throw new Error("better-sqlite3 smoke test failed"); \
-  db.close(); \
-  console.log("better-sqlite3 native binary OK"); \
+  (async () => { \
+    require("./lambda/kb-keyword-sync-worker/dist/lambda/kb-keyword-sync-worker/handler.js"); \
+    const Database = require("./lambda/kb-keyword-sync-worker/node_modules/better-sqlite3"); \
+    const db = new Database(":memory:"); \
+    db.exec("CREATE TABLE t (x INTEGER)"); \
+    db.prepare("INSERT INTO t VALUES (1)").run(); \
+    if (db.prepare("SELECT x FROM t").get().x !== 1) throw new Error("better-sqlite3 smoke test failed"); \
+    db.close(); \
+    console.log("better-sqlite3 native binary OK"); \
+    const { extractText } = require("./lambda/kb-keyword-sync-worker/dist/app/lib/kb-keyword-index.js"); \
+    const pdfB64 = "JVBERi0xLjQKMSAwIG9iajw8L1R5cGUvQ2F0YWxvZy9QYWdlcyAyIDAgUj4+ZW5kb2JqCjIgMCBvYmo8PC9UeXBlL1BhZ2VzL0tpZHNbMyAwIFJdL0NvdW50IDE+PmVuZG9iagozIDAgb2JqPDwvVHlwZS9QYWdlL1BhcmVudCAyIDAgUi9SZXNvdXJjZXM8PC9Gb250PDwvRjEgNCAwIFI+Pj4+L01lZGlhQm94WzAgMCAyMDAgMjAwXS9Db250ZW50cyA1IDAgUj4+ZW5kb2JqCjQgMCBvYmo8PC9UeXBlL0ZvbnQvU3VidHlwZS9UeXBlMS9CYXNlRm9udC9IZWx2ZXRpY2E+PmVuZG9iago1IDAgb2JqPDwvTGVuZ3RoIDQ0Pj4Kc3RyZWFtCkJUIC9GMSAyNCBUZiAyMCAxMDAgVGQgKEhlbGxvIFBERikgVGogRVQKZW5kc3RyZWFtCmVuZG9iagp0cmFpbGVyPDwvU2l6ZSA2L1Jvb3QgMSAwIFI+PgolJUVPRgo="; \
+    const text = await extractText(Buffer.from(pdfB64, "base64"), "smoke-test.pdf"); \
+    if (!text.includes("Hello PDF")) throw new Error("extractText smoke test failed: got " + JSON.stringify(text)); \
+    console.log("PDF text extraction OK"); \
+  })().catch((err) => { \
+    console.error(err); \
+    process.exit(1); \
+  }); \
 '
 
 # tsc's rootDir ("../..", i.e. the repo root) makes it mirror the full
