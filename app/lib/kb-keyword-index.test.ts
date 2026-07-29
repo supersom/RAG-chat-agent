@@ -903,6 +903,215 @@ describe("trackTenantObjects", () => {
   });
 });
 
+describe("seedTrackingFileIfMissing (via reconcileKeywordIndex)", () => {
+  const SEED_TENANT = "test-tenant-seed";
+  const SEED_KB_ID = "test-kb-seed";
+  const SEED_BUCKET = "test-bucket-seed";
+  const SEED_KEY = `tenants/${SEED_TENANT}/handbook.txt`;
+
+  const s3Objects = [
+    {
+      Key: SEED_KEY,
+      ETag: '"etag-handbook"',
+      Size: 34,
+      LastModified: new Date("2026-01-01T00:00:00Z"),
+    },
+  ];
+
+  function seedIndexPath() {
+    return tempDbPathFor(SEED_TENANT, SEED_KB_ID);
+  }
+  function seedTrackingPath() {
+    return tempTrackingDbPathFor(SEED_TENANT, SEED_KB_ID);
+  }
+  function removeSeedDbs() {
+    for (const p of [seedIndexPath(), seedTrackingPath(), seedTrackingPath() + ".uploaded"]) {
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+    }
+  }
+
+  beforeEach(removeSeedDbs);
+  afterEach(removeSeedDbs);
+
+  // Two independent S3 objects, keyed the way the real code keys them: the
+  // keyword-index file and the (separate) tracking file. Existing tests in
+  // this file collapse both into one `storedIndexBody`, which would hide the
+  // very distinction these tests are about.
+  function mockS3({ trackingExists }: { trackingExists: boolean }) {
+    const store: Record<string, Buffer | null> = {
+      index: null,
+      tracking: trackingExists ? emptyTrackingFileBody() : null,
+    };
+    const putKeys: string[] = [];
+
+    const slotFor = (key: string) => (key.endsWith("-tracking.sqlite") ? "tracking" : "index");
+
+    sendMock.mockImplementation(async (command: any) => {
+      const type = command.__type;
+      if (type === "GetObjectCommand") {
+        const key = command.input.Key as string;
+        if (key.endsWith(".sqlite")) {
+          const body = store[slotFor(key)];
+          if (!body) {
+            const err: any = new Error("NoSuchKey");
+            err.name = "NoSuchKey";
+            err.$metadata = { httpStatusCode: 404 };
+            throw err;
+          }
+          return { Body: body };
+        }
+        return { Body: Buffer.from("refund policy handbook materiality", "utf8") };
+      }
+      if (type === "ListObjectsV2Command") {
+        const prefix = (command.input.Prefix as string) || "";
+        return {
+          Contents: s3Objects.filter((object) => object.Key.startsWith(prefix)),
+          IsTruncated: false,
+        };
+      }
+      if (type === "PutObjectCommand") {
+        const key = command.input.Key as string;
+        putKeys.push(key);
+        store[slotFor(key)] = Buffer.from(command.input.Body);
+        return {};
+      }
+      throw new Error(`Unexpected command: ${type}`);
+    });
+
+    return {
+      trackingPutCount: () => putKeys.filter((key) => key.endsWith("-tracking.sqlite")).length,
+      openTracking: () => {
+        const uploadedPath = seedTrackingPath() + ".uploaded";
+        fs.writeFileSync(uploadedPath, store.tracking!);
+        return new Database(uploadedPath);
+      },
+      trackingBody: () => store.tracking,
+    };
+  }
+
+  // A tracking file that already exists but carries no documents rows - the
+  // "already initialised, do not touch" case, distinct from "absent".
+  function emptyTrackingFileBody(): Buffer {
+    const tmp = path.join(os.tmpdir(), `seed-existing-tracking-${Date.now()}.sqlite`);
+    const db = new Database(tmp);
+    db.exec(`
+      CREATE TABLE documents (
+        id INTEGER PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        knowledge_base_id TEXT NOT NULL,
+        bucket TEXT NOT NULL,
+        s3_key TEXT NOT NULL,
+        etag TEXT,
+        size INTEGER,
+        last_modified TEXT,
+        indexed_at TEXT NOT NULL,
+        UNIQUE(tenant_id, knowledge_base_id, bucket, s3_key)
+      );
+    `);
+    db.close();
+    const body = fs.readFileSync(tmp);
+    fs.unlinkSync(tmp);
+    return body;
+  }
+
+  it("seeds a missing tracking file from the keyword-index file's documents table, preserving etag/size/last_modified exactly", async () => {
+    const s3 = mockS3({ trackingExists: false });
+
+    // Round 1 builds the keyword-index file. The documents table is still
+    // empty when seeding runs here, so nothing is seeded yet - exactly what
+    // a brand-new tenant looks like.
+    await reconcileKeywordIndex({
+      tenantId: SEED_TENANT,
+      knowledgeBaseId: SEED_KB_ID,
+      bucketName: SEED_BUCKET,
+      timeBudgetMs: 60_000,
+      now: () => 1_000_000,
+    });
+    expect(s3.trackingPutCount()).toBe(0);
+
+    // Round 2 is the pre-existing-keyword-tenant case: real change-tracking
+    // history now sits in the keyword-index file, and no tracking file has
+    // ever existed.
+    await reconcileKeywordIndex({
+      tenantId: SEED_TENANT,
+      knowledgeBaseId: SEED_KB_ID,
+      bucketName: SEED_BUCKET,
+      timeBudgetMs: 60_000,
+      now: () => 1_000_000,
+    });
+
+    expect(s3.trackingPutCount()).toBe(1);
+
+    const tracking = s3.openTracking();
+    const rows = tracking
+      .prepare(
+        `SELECT s3_key, etag, size, last_modified FROM documents
+         WHERE tenant_id = ? AND knowledge_base_id = ? AND bucket = ?`,
+      )
+      .all(SEED_TENANT, SEED_KB_ID, SEED_BUCKET) as Array<{
+      s3_key: string;
+      etag: string | null;
+      size: number | null;
+      last_modified: string | null;
+    }>;
+    tracking.close();
+
+    // These three columns are precisely what hasObjectChanged compares - if
+    // any of them were dropped or rewritten during the copy, the next diff
+    // would call the object "changed" and re-embed it.
+    expect(rows).toEqual([
+      {
+        s3_key: SEED_KEY,
+        etag: '"etag-handbook"',
+        size: 34,
+        last_modified: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("makes the tenant's next trackTenantObjects diff report the corpus unchanged, instead of re-embedding all of it", async () => {
+    const s3 = mockS3({ trackingExists: false });
+
+    await reconcileKeywordIndex({
+      tenantId: SEED_TENANT, knowledgeBaseId: SEED_KB_ID, bucketName: SEED_BUCKET,
+      timeBudgetMs: 60_000, now: () => 1_000_000,
+    });
+    await reconcileKeywordIndex({
+      tenantId: SEED_TENANT, knowledgeBaseId: SEED_KB_ID, bucketName: SEED_BUCKET,
+      timeBudgetMs: 60_000, now: () => 1_000_000,
+    });
+    expect(s3.trackingPutCount()).toBe(1);
+
+    if (fs.existsSync(seedTrackingPath())) fs.unlinkSync(seedTrackingPath());
+    const diff = await trackTenantObjects({
+      tenantId: SEED_TENANT,
+      knowledgeBaseId: SEED_KB_ID,
+      bucketName: SEED_BUCKET,
+    });
+
+    expect(diff.listedKeys).toEqual([SEED_KEY]);
+    expect(diff.changedKeys).toEqual([]); // the whole point: no re-embed
+    expect(diff.deletedKeys).toEqual([]);
+  });
+
+  it("never writes over a tracking file that already exists", async () => {
+    const s3 = mockS3({ trackingExists: true });
+    const before = s3.trackingBody();
+
+    await reconcileKeywordIndex({
+      tenantId: SEED_TENANT, knowledgeBaseId: SEED_KB_ID, bucketName: SEED_BUCKET,
+      timeBudgetMs: 60_000, now: () => 1_000_000,
+    });
+    await reconcileKeywordIndex({
+      tenantId: SEED_TENANT, knowledgeBaseId: SEED_KB_ID, bucketName: SEED_BUCKET,
+      timeBudgetMs: 60_000, now: () => 1_000_000,
+    });
+
+    expect(s3.trackingPutCount()).toBe(0);
+    expect(s3.trackingBody()).toBe(before);
+  });
+});
+
 describe("submitVectorSync", () => {
   const SYNC_TENANT = "test-tenant-vectorsync";
   const SYNC_KB_ID = "test-kb-vectorsync";

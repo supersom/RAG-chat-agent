@@ -939,6 +939,12 @@ export async function reconcileKeywordIndex({
     if (resumed) {
       run = resumed;
     } else {
+      // Only attempted on a genuinely fresh (non-checkpoint-resumed) run -
+      // it's idempotent-safe either way (checks tracking-file existence
+      // every time), but there's no reason to repeat the check on every
+      // resumed round of the same in-progress job.
+      await seedTrackingFileIfMissing({ client, tenantId, knowledgeBaseId, bucketName, sourceDb: db });
+
       // Fresh run: list the bucket once, decide what changed, and run the
       // stale-object deletion sweep - all of this depends on having the full
       // current listing, so none of it is repeated on a resumed invocation.
@@ -1050,6 +1056,100 @@ export async function reconcileKeywordIndex({
     changedKeys,
     deletedKeys,
   };
+}
+
+// If this tenant has never had a tracking file before - either brand new,
+// or (the case this exists for) a tenant that had keyword search enabled
+// pre-this-branch and has real change-tracking history sitting in the
+// keyword-index file instead - seed the new tracking file from that
+// already-open keyword-index `documents` table before this function's
+// caller uploads its own checkpoint. Both files share the exact same
+// `documents` schema (see initDatabase), so this is a straight row copy,
+// not a data transformation. INSERT OR IGNORE, never overwrite: this only
+// fills gaps in a brand-new tracking file - it must never run again (or
+// clobber anything) once the tracking file exists, since
+// trackTenantObjects/submitVectorSync own its contents independently after
+// that point (e.g. a key correctly still marked vector_pending because it
+// hasn't actually been embedded yet must never be silently "seen").
+//
+// Without this, the first sync after this branch ships would see an empty
+// tracking file, mark every object "changed", and re-embed the tenant's
+// whole corpus through Bedrock at real cost.
+async function seedTrackingFileIfMissing({
+  client,
+  tenantId,
+  knowledgeBaseId,
+  bucketName,
+  sourceDb,
+}: {
+  client: S3Client;
+  tenantId: string;
+  knowledgeBaseId: string;
+  bucketName: string;
+  sourceDb: Database.Database;
+}): Promise<void> {
+  const { indexBucket, indexKey } = trackingLocation(tenantId, knowledgeBaseId, bucketName);
+  const trackingDbPath = tempTrackingPath(tenantId, knowledgeBaseId);
+
+  if (fs.existsSync(trackingDbPath)) fs.unlinkSync(trackingDbPath);
+  await downloadExistingIndex({ client, indexBucket, indexKey, dbPath: trackingDbPath });
+  if (fs.existsSync(trackingDbPath)) {
+    // Tracking file already exists - never seed over it.
+    fs.unlinkSync(trackingDbPath);
+    return;
+  }
+
+  const rows = sourceDb
+    .prepare(
+      `SELECT tenant_id, knowledge_base_id, bucket, s3_key, etag, size, last_modified, indexed_at
+       FROM documents WHERE tenant_id = ? AND knowledge_base_id = ? AND bucket = ?`,
+    )
+    .all(tenantId, knowledgeBaseId, bucketName) as Array<{
+    tenant_id: string;
+    knowledge_base_id: string;
+    bucket: string;
+    s3_key: string;
+    etag: string | null;
+    size: number | null;
+    last_modified: string | null;
+    indexed_at: string;
+  }>;
+  if (rows.length === 0) return;
+
+  const trackingDb = initDatabase(trackingDbPath);
+  try {
+    const insert = trackingDb.prepare(
+      `INSERT OR IGNORE INTO documents
+         (tenant_id, knowledge_base_id, bucket, s3_key, etag, size, last_modified, indexed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const insertMany = trackingDb.transaction((items: typeof rows) => {
+      for (const row of items) {
+        insert.run(
+          row.tenant_id,
+          row.knowledge_base_id,
+          row.bucket,
+          row.s3_key,
+          row.etag,
+          row.size,
+          row.last_modified,
+          row.indexed_at,
+        );
+      }
+    });
+    insertMany(rows);
+  } finally {
+    trackingDb.close();
+  }
+
+  await client.send(
+    new PutObjectCommand({
+      Bucket: indexBucket,
+      Key: indexKey,
+      Body: fs.readFileSync(trackingDbPath),
+      ContentType: "application/vnd.sqlite3",
+    }),
+  );
 }
 
 // The tenant-scoped equivalent of reconcileKeywordIndex for tenants with
