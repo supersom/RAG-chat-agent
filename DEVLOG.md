@@ -1,5 +1,13 @@
 # Dev Log
 
+## 2026-07-29 - Full sync now reprocesses unchanged keyword-index documents
+
+**Context:** After the PDF worker fix went live, a remaining semantic gap showed up in the admin "Full sync" flow: the click carried `mode: "full"` through vector-sync submission, but the async keyword-index worker still called `reconcileKeywordIndex` with its implicit incremental behavior. That meant a document already marked as tracked in the SQLite `documents` table, but missing chunks because of an older extraction bug, would still be skipped unless its S3 metadata changed.
+
+**Fix:** Added a `mode` option to `reconcileKeywordIndex`. Incremental mode keeps the existing etag/size/lastModified diff behavior; full mode enqueues every listed object so keyword chunks are rebuilt even when S3 says the object is unchanged. The SQS worker now passes the job message mode into `reconcileKeywordIndex`, so an admin "Full sync" reaches both the vector index and the keyword index.
+
+**Verification:** `npx vitest run app/lib/kb-keyword-index.test.ts lambda/kb-keyword-sync-worker/handler.test.ts`, `npx tsc --noEmit`, full `npx vitest run`, `npm run lint`, root `npm run build`, and worker `npm run build` all passed locally. Not live-verified yet; deployment is the next step.
+
 ## 2026-07-29 (later) — Two more post-deploy bugs: stale CORS origin blocking uploads, PDF extraction silently broken by a tsc downlevel
 
 **Context:** Immediately after the async-worker segfault fix (previous entry) went live, live use surfaced two further, unrelated bugs.

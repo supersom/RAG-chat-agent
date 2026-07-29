@@ -83,6 +83,7 @@ describe("kb-keyword-sync-worker handler", () => {
         knowledgeBaseId: "kb-acme",
         bucketName: "pooled-bucket",
         region: "us-east-2",
+        mode: "incremental",
       }),
     );
 
@@ -126,6 +127,14 @@ describe("kb-keyword-sync-worker handler", () => {
     expect(mockedReconcile).toHaveBeenCalledWith(
       expect.objectContaining({ timeBudgetMs: 300_000 }), // 500_000 - 200_000 margin
     );
+  });
+
+  it("passes the message's mode through to reconcileKeywordIndex, not just a hardcoded default - a full-sync click must actually reach the keyword index, not only vector-sync", async () => {
+    mockedReconcile.mockResolvedValue(reconcileResult({ partial: false }));
+
+    await handler(sqsEvent({ ...message, mode: "full" }), mockContext(600_000), noopCallback);
+
+    expect(mockedReconcile).toHaveBeenCalledWith(expect.objectContaining({ mode: "full" }));
   });
 
   it("leaves the job running (not failed) and rethrows when remaining time drops below the minimum round budget, so SQS redelivers", async () => {

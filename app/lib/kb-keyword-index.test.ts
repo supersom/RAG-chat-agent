@@ -240,6 +240,95 @@ describe("reconcileKeywordIndex checkpointing", () => {
   });
 });
 
+describe("reconcileKeywordIndex full mode", () => {
+  it("re-processes every listed object in full mode, even ones S3 reports unchanged - unlike the default (incremental) behavior, which skips them", async () => {
+    let storedIndexBody: Buffer | null = null;
+
+    const s3Objects = [
+      {
+        Key: "a.txt",
+        ETag: '"etag-a"',
+        Size: 10,
+        LastModified: new Date("2026-01-01T00:00:00Z"),
+      },
+      {
+        Key: "b.txt",
+        ETag: '"etag-b"',
+        Size: 10,
+        LastModified: new Date("2026-01-01T00:00:00Z"),
+      },
+    ];
+
+    sendMock.mockImplementation(async (command: any) => {
+      const type = command.__type;
+      if (type === "GetObjectCommand") {
+        const key = command.input.Key as string;
+        if (key.endsWith(".sqlite")) {
+          if (!storedIndexBody) {
+            const err: any = new Error("NoSuchKey");
+            err.name = "NoSuchKey";
+            err.$metadata = { httpStatusCode: 404 };
+            throw err;
+          }
+          return { Body: storedIndexBody };
+        }
+        const content = key === "a.txt" ? "alpha content" : "beta content";
+        return { Body: Buffer.from(content, "utf8") };
+      }
+      if (type === "ListObjectsV2Command") {
+        return { Contents: s3Objects, IsTruncated: false };
+      }
+      if (type === "PutObjectCommand") {
+        storedIndexBody = Buffer.from(command.input.Body);
+        return {};
+      }
+      throw new Error(`Unexpected command: ${type}`);
+    });
+
+    // First run (default/incremental): indexes both objects, nothing to
+    // skip yet since nothing was tracked before this.
+    const first = await reconcileKeywordIndex({
+      tenantId: TENANT_ID,
+      knowledgeBaseId: KB_ID,
+      bucketName: BUCKET,
+      timeBudgetMs: 60_000,
+      now: () => 1_000_000,
+    });
+    expect(first.indexedObjectCount).toBe(2);
+
+    // Second run, same (unchanged) S3 state, default mode: both objects
+    // are now tracked with matching etag/size/lastModified, so the
+    // existing incremental diff skips them entirely.
+    const incremental = await reconcileKeywordIndex({
+      tenantId: TENANT_ID,
+      knowledgeBaseId: KB_ID,
+      bucketName: BUCKET,
+      timeBudgetMs: 60_000,
+      now: () => 1_000_000,
+    });
+    expect(incremental.changedObjectCount).toBe(0);
+    expect(incremental.unchangedObjectCount).toBe(2);
+    expect(incremental.indexedObjectCount).toBe(0);
+
+    // Third run, same unchanged S3 state, mode: "full" - every listed
+    // object must be treated as needing reprocessing, not just genuinely
+    // changed ones. This is what lets an admin recover a document whose
+    // chunks were silently lost to a since-fixed bug (e.g. the pdf.worker
+    // require() bug), without needing to touch S3 at all.
+    const full = await reconcileKeywordIndex({
+      tenantId: TENANT_ID,
+      knowledgeBaseId: KB_ID,
+      bucketName: BUCKET,
+      timeBudgetMs: 60_000,
+      now: () => 1_000_000,
+      mode: "full",
+    });
+    expect(full.changedObjectCount).toBe(2);
+    expect(full.unchangedObjectCount).toBe(0);
+    expect(full.indexedObjectCount).toBe(2);
+  });
+});
+
 describe("extractText DOMMatrix polyfill", () => {
   const originalDOMMatrix = (globalThis as any).DOMMatrix;
 

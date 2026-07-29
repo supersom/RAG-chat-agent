@@ -91,6 +91,10 @@ export type KeywordIndexUpdateResult = {
 type TenantObjectDiff = {
   listedObjectCount: number;
   listedKeys: string[];
+  // The full listing, unfiltered - reconcileKeywordIndex's own "full" mode
+  // enqueues this instead of `changed`, to force-reprocess objects the
+  // etag/size/lastModified diff would otherwise consider unchanged.
+  objects: S3InventoryObject[];
   changed: S3InventoryObject[];
   changedKeys: string[];
   unchangedObjectCount: number;
@@ -119,6 +123,13 @@ type KeywordIndexParams = {
   maxPdfBytes?: number;
   // trackTenantObjects-only: see its own doc comment for why this exists.
   deferIfKeywordIndexExists?: boolean;
+  // reconcileKeywordIndex-only: "full" forces every listed object to be
+  // reprocessed, matching submitVectorSync's own full/incremental
+  // distinction. Only consulted on a fresh (non-resumed) run - a
+  // checkpoint-resumed run continues draining whatever the fresh run
+  // already enqueued, so there's nothing further for mode to decide.
+  // Defaults to incremental (the pre-existing behavior) when omitted.
+  mode?: "full" | "incremental";
 };
 
 type ReconcileRunState = {
@@ -792,6 +803,7 @@ async function diffTenantObjects(
   return {
     listedObjectCount: objects.length,
     listedKeys: objects.map((object) => object.key),
+    objects,
     changed,
     changedKeys: changed.map((object) => object.key),
     unchangedObjectCount,
@@ -934,6 +946,7 @@ export async function reconcileKeywordIndex({
   timeBudgetMs,
   now = Date.now,
   maxPdfBytes,
+  mode = "incremental",
 }: KeywordIndexParams): Promise<KeywordIndexUpdateResult> {
   const { indexBucket, indexKey } = keywordIndexLocation(tenantId, knowledgeBaseId, bucketName);
   const client = s3Client(region, credentials);
@@ -995,17 +1008,24 @@ export async function reconcileKeywordIndex({
         for (const key of diff.deletedKeys) deleteOne(key);
       }
 
+      // "full" mode forces every listed object through the queue, not just
+      // ones the etag/size/lastModified diff considers changed - the only
+      // way to recover a document whose chunks were silently lost to a
+      // since-fixed bug (nothing about S3's own metadata changes in that
+      // case, so the incremental diff would otherwise skip it forever).
+      const toEnqueue = mode === "full" ? diff.objects : diff.changed;
+
       clearQueue(db);
-      enqueueObjects(db, diff.changed);
+      enqueueObjects(db, toEnqueue);
 
       listedKeys = diff.listedKeys;
-      changedKeys = diff.changedKeys;
+      changedKeys = mode === "full" ? diff.listedKeys : diff.changedKeys;
       deletedKeys = diff.partial ? [] : diff.deletedKeys;
 
       run = {
         listedObjectCount: diff.listedObjectCount,
-        changedObjectCount: diff.changedKeys.length,
-        unchangedObjectCount: diff.unchangedObjectCount,
+        changedObjectCount: toEnqueue.length,
+        unchangedObjectCount: mode === "full" ? 0 : diff.unchangedObjectCount,
         deletedObjectCount: deletedKeys.length,
         indexedObjectCount: 0,
         indexedChunkCount: 0,

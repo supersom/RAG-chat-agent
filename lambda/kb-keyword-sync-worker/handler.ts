@@ -77,6 +77,7 @@ async function processMessage(message: JobMessage, context: Context): Promise<vo
         bucketName: message.bucketName,
         region: message.region,
         timeBudgetMs: remainingMs,
+        mode: message.mode,
       });
     } while (result.partial);
   } catch (err) {
