@@ -94,6 +94,36 @@ resource "aws_iam_role_policy" "kb_keyword_sync_worker" {
   })
 }
 
+# The Next.js app itself (not the worker) needs to enqueue jobs and read/
+# write job status - it authenticates as the shared claude-qkstart-bedrock
+# service user via BAWS_* static keys (see app/lib/kb-sync-queue.ts,
+# app/lib/db/keyword-sync-jobs.ts), same as every other AWS call the app
+# makes. Confirmed missing by the final whole-branch review: without this,
+# the very first "Sync" click would fail with AccessDenied, silently caught
+# by the route's own try/catch and surfaced as a keywordEnqueueError.
+resource "aws_iam_user_policy" "kb_keyword_sync_app_access" {
+  name = "KeywordSyncAppAccess"
+  user = data.aws_iam_user.service_user.user_name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "SendKeywordSyncJobs"
+        Effect   = "Allow"
+        Action   = ["sqs:SendMessage"]
+        Resource = [aws_sqs_queue.kb_keyword_sync.arn]
+      },
+      {
+        Sid      = "KeywordSyncJobsTableAppAccess"
+        Effect   = "Allow"
+        Action   = ["dynamodb:GetItem", "dynamodb:PutItem"]
+        Resource = [aws_dynamodb_table.keyword_sync_jobs.arn]
+      },
+    ]
+  })
+}
+
 resource "aws_lambda_function" "kb_keyword_sync_worker" {
   function_name = "kb-keyword-sync-worker"
   role          = aws_iam_role.kb_keyword_sync_worker.arn
@@ -101,6 +131,10 @@ resource "aws_lambda_function" "kb_keyword_sync_worker" {
   image_uri     = "${aws_ecr_repository.kb_keyword_sync_worker.repository_url}:latest"
   timeout       = 600
   memory_size   = 1024
+
+  ephemeral_storage {
+    size = 2048 # MB - headroom for keyword-index file growth beyond today's 75MB; default is 512MB
+  }
 
   environment {
     variables = {
