@@ -966,6 +966,15 @@ This task is infra-only — no unit tests. Verification is `terraform validate`/
 # COPY both lambda/kb-keyword-sync-worker/ and app/lib/ into the same image.
 FROM public.ecr.aws/lambda/nodejs:20 AS build
 
+# public.ecr.aws/lambda/nodejs:20 does NOT ship Python or a C/C++ toolchain
+# by default - confirmed directly (not assumed): `npm install` fails with
+# "gyp ERR! find Python - Could not find any Python installation to use"
+# without this. `dnf` (present on this Amazon Linux 2023-based image) and
+# these exact three packages were verified live: `dnf install -y python3 gcc
+# gcc-c++ make` succeeds, and the resulting `python3`/`gcc`/`make` binaries
+# run and report real versions (Python 3.9.25, GCC 11.5.0, GNU Make 4.3).
+RUN dnf install -y python3 gcc gcc-c++ make && dnf clean all
+
 WORKDIR /build
 COPY lambda/kb-keyword-sync-worker/package.json lambda/kb-keyword-sync-worker/
 RUN npm install --omit=dev --prefix lambda/kb-keyword-sync-worker
@@ -994,7 +1003,7 @@ Run (from the repo root, so the build context includes both `lambda/` and `app/`
 ```bash
 docker build -f lambda/kb-keyword-sync-worker/Dockerfile -t kb-keyword-sync-worker:local .
 ```
-Expected: build succeeds, ending in a tagged image. If `better-sqlite3`'s native build fails inside the container, check the base image's `node-gyp`/build-essential availability - the AWS base image includes these; a failure here means a real dependency problem to fix before proceeding, not something to route around.
+Expected: build succeeds, ending in a tagged image. The `npm install` step's log will show `npm warn EBADENGINE` for `better-sqlite3@13.0.1` (it declares `engines.node: >=22`, this image ships Node 20) - that's an expected, non-fatal warning, not a failure; this repo has no `.npmrc` setting `engine-strict`, so npm doesn't hard-fail on it. If the build fails for any *other* reason (not the EBADENGINE warning), that's a real, reportable problem - don't route around it.
 
 - [ ] **Step 3: Add SQS queue + DLQ, ECR repo, IAM role, Lambda function, and event source mapping to Terraform**
 
