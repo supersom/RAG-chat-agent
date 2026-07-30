@@ -116,17 +116,18 @@ describe("kb-keyword-sync-worker handler", () => {
     expect(sendMock).not.toHaveBeenCalled();
   });
 
-  it("keeps calling reconcileKeywordIndex until partial is false", async () => {
-    mockedReconcile
-      .mockResolvedValueOnce(reconcileResult({ partial: true, indexedObjectCount: 1 }))
-      .mockResolvedValueOnce(reconcileResult({ partial: true, indexedObjectCount: 1 }))
-      .mockResolvedValueOnce(reconcileResult({ partial: false, indexedObjectCount: 1 }));
+  it("leaves the job running and sends a continuation when a checkpoint round is partial", async () => {
+    mockedReconcile.mockResolvedValue(reconcileResult({ partial: true, indexedObjectCount: 1 }));
 
     await handler(sqsEvent(message), mockContext(600_000), noopCallback);
 
-    expect(mockedReconcile).toHaveBeenCalledTimes(3);
+    expect(mockedReconcile).toHaveBeenCalledTimes(1);
+    expect(sendMock).toHaveBeenCalledTimes(1);
+    const [{ input }] = sendMock.mock.calls[0];
+    expect(input.QueueUrl).toBe("https://sqs.us-east-2.amazonaws.com/123/kb-keyword-sync");
+    expect(JSON.parse(input.MessageBody)).toEqual(message);
     const statuses = mockedPut.mock.calls.map(([job]) => job.status);
-    expect(statuses).toEqual(["running", "complete"]);
+    expect(statuses).toEqual(["running"]);
   });
 
   it("writes a failed record with the error message when reconcileKeywordIndex throws", async () => {
@@ -141,13 +142,13 @@ describe("kb-keyword-sync-worker handler", () => {
     expect(finalJob.finishedAt).not.toBeNull();
   });
 
-  it("passes the Lambda's actual remaining time (minus the safety margin) as timeBudgetMs to reconcileKeywordIndex", async () => {
+  it("caps timeBudgetMs so the unbudgeted download and upload still fit before Lambda timeout", async () => {
     mockedReconcile.mockResolvedValue(reconcileResult({ partial: false }));
 
     await handler(sqsEvent(message), mockContext(500_000), noopCallback);
 
     expect(mockedReconcile).toHaveBeenCalledWith(
-      expect.objectContaining({ timeBudgetMs: 300_000 }), // 500_000 - 200_000 margin
+      expect.objectContaining({ timeBudgetMs: 90_000 }),
     );
   });
 
@@ -162,8 +163,8 @@ describe("kb-keyword-sync-worker handler", () => {
   it("leaves the job running and sends a continuation when remaining time drops below the minimum round budget", async () => {
     mockedReconcile.mockResolvedValue(reconcileResult({ partial: true }));
 
-    // 205_000 - 200_000 margin = 5_000, below MIN_ROUND_BUDGET_MS
-    await handler(sqsEvent(message), mockContext(205_000), noopCallback);
+    // 380_000 - 360_000 margin = 20_000, below MIN_ROUND_BUDGET_MS
+    await handler(sqsEvent(message), mockContext(380_000), noopCallback);
 
     const statuses = mockedPut.mock.calls.map(([job]) => job.status);
     expect(statuses).toEqual(["running"]); // never reaches "failed" or "complete"
@@ -175,26 +176,13 @@ describe("kb-keyword-sync-worker handler", () => {
     expect(clientConfigs[0].region).toBe("us-east-2");
   });
 
-  it("stops looping mid-job once the remaining time runs out, keeping the work already checkpointed by the completed rounds", async () => {
+  it("does not run multiple checkpoint rounds in one invocation", async () => {
     mockedReconcile.mockResolvedValue(reconcileResult({ partial: true }));
-    let remainingMs = 600_000;
-    const draining = {
-      getRemainingTimeInMillis: () => {
-        const current = remainingMs;
-        remainingMs -= 250_000;
-        return current;
-      },
-    } as Context;
 
-    // Rounds see 600s then 350s remaining (400s/150s budgets after the 200s
-    // margin); the third check sees 100s remaining, i.e. a -100s budget, so
-    // it sends a continuation instead of starting a round.
-    await handler(sqsEvent(message), draining, noopCallback);
+    await handler(sqsEvent(message), mockContext(600_000), noopCallback);
 
-    expect(mockedReconcile).toHaveBeenCalledTimes(2);
-    expect(mockedReconcile.mock.calls.map(([params]) => params.timeBudgetMs)).toEqual([
-      400_000, 150_000,
-    ]);
+    expect(mockedReconcile).toHaveBeenCalledTimes(1);
+    expect(mockedReconcile).toHaveBeenCalledWith(expect.objectContaining({ timeBudgetMs: 90_000 }));
     expect(sendMock).toHaveBeenCalledTimes(1);
     const statuses = mockedPut.mock.calls.map(([job]) => job.status);
     expect(statuses).toEqual(["running"]);

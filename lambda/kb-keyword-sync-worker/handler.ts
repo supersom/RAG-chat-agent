@@ -12,24 +12,18 @@ type JobMessage = {
   mode: "full" | "incremental";
 };
 
-// reconcileKeywordIndex's own timeBudgetMs only governs its per-object loop
-// - the download that precedes it and the checkpoint upload that follows it
-// both happen OUTSIDE that budget window entirely, so this margin must cover
-// BOTH, not just one. Real wall-clock cost of one reconcileKeywordIndex call
-// is therefore download + timeBudgetMs + upload, and must fit inside
-// context.getRemainingTimeInMillis() at the moment the round starts.
-// Measured worst case for this tenant's current index size was 60-180s for
-// download+upload combined - this stays comfortably above that, with real
-// margin for corpus growth, not just "conservative" in name. (A prior
-// version of this constant was 30_000, which the comment claimed was
-// conservative relative to 60-180s while the number contradicted it - fixed
-// after a whole-branch review caught the mismatch.)
-const SAFETY_MARGIN_MS = 200_000;
+// reconcileKeywordIndex's timeBudgetMs only governs its per-object loop. The
+// S3 download before it and the SQLite checkpoint upload after it are outside
+// that budget, and the live large-tenant index is already hundreds of MB. Keep
+// each Lambda invocation to one short reconcile round so the checkpoint upload
+// can finish before Lambda's hard timeout.
+const SAFETY_MARGIN_MS = 360_000;
+const MAX_RECONCILE_ROUND_BUDGET_MS = 90_000;
 // Below this remaining budget, don't even start another reconcileKeywordIndex
 // round - enqueue an explicit continuation for a fresh invocation instead of
 // starting work that can't possibly make meaningful progress before this
 // invocation's own deadline.
-const MIN_ROUND_BUDGET_MS = 10_000;
+const MIN_ROUND_BUDGET_MS = 30_000;
 
 function regionFromQueueUrl(queueUrl: string): string | undefined {
   return queueUrl.match(/^https:\/\/sqs\.([^.]+)\.amazonaws\.com\//)?.[1];
@@ -88,23 +82,22 @@ async function processMessage(message: JobMessage, context: Context): Promise<vo
 
   let result;
   try {
-    while (true) {
-      const remainingMs = context.getRemainingTimeInMillis() - SAFETY_MARGIN_MS;
-      if (remainingMs < MIN_ROUND_BUDGET_MS) {
-        await sendContinuation(message);
-        return;
-      }
-      result = await reconcileKeywordIndex({
-        tenantId: message.tenantId,
-        knowledgeBaseId: message.knowledgeBaseId,
-        bucketName: message.bucketName,
-        region: message.region,
-        timeBudgetMs: remainingMs,
-        mode: message.mode,
-      });
-      if (!result.partial) {
-        break;
-      }
+    const availableRoundBudgetMs = context.getRemainingTimeInMillis() - SAFETY_MARGIN_MS;
+    if (availableRoundBudgetMs < MIN_ROUND_BUDGET_MS) {
+      await sendContinuation(message);
+      return;
+    }
+    result = await reconcileKeywordIndex({
+      tenantId: message.tenantId,
+      knowledgeBaseId: message.knowledgeBaseId,
+      bucketName: message.bucketName,
+      region: message.region,
+      timeBudgetMs: Math.min(availableRoundBudgetMs, MAX_RECONCILE_ROUND_BUDGET_MS),
+      mode: message.mode,
+    });
+    if (result.partial) {
+      await sendContinuation(message);
+      return;
     }
   } catch (err) {
     await putKeywordSyncJob(

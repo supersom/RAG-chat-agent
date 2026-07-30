@@ -145,7 +145,7 @@ resource "aws_lambda_function" "kb_keyword_sync_worker" {
   package_type  = "Image"
   image_uri     = "${aws_ecr_repository.kb_keyword_sync_worker.repository_url}:latest"
   timeout       = 600
-  memory_size   = 1024
+  memory_size   = 2048
 
   ephemeral_storage {
     size = 2048 # MB - headroom for keyword-index file growth beyond today's 75MB; default is 512MB

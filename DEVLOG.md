@@ -591,3 +591,14 @@ Remaining, not addressed and not blocking: the ~1,360-object corpus will take ma
 
 **Status:** Implemented and tested. Not yet live-verified - next real signal is clicking "Sync unindexed docs" again for `OpenAI Default Test Org` post-deploy, since this fix doesn't retroactively build the index that failed to build before.
 
+
+
+## 2026-07-29 18:36 PDT — Keyword sync DLQed after the first timeout fix; bounded each worker invocation to one short checkpoint round
+
+**Context:** The large tenant keyword-index job for `OpenAI Default Test Org` (`01KY88W3KWE1WAM444MTX88TXP`, KB `3P7BRYP5S5`) was stranded with the main queue empty and one visible message in `kb-keyword-sync-dlq`. The S3 checkpoint file still existed at `.customer-support-agent/keyword-indexes/01KY88W3KWE1WAM444MTX88TXP/3P7BRYP5S5.sqlite` and was 298,983,424 bytes, so the recovery path is to re-drive the message from the DLQ and resume from that checkpoint, not delete the index and start over.
+
+**Root cause:** The previous worker fix stopped using SQS redelivery as normal checkpoint flow, but it still allowed multiple `reconcileKeywordIndex` rounds inside one Lambda invocation. `reconcileKeywordIndex` only budgets the per-object loop; the full SQLite download before the loop and checkpoint upload after it are outside `timeBudgetMs`. At the live index size, a 200s safety margin was not enough to guarantee the handler could upload the checkpoint, send a continuation, and return before Lambda's 600s hard timeout.
+
+**Fix:** The worker now performs at most one checkpoint round per SQS message. It reserves 360s for unbudgeted S3 download/upload and runtime overhead, caps the reconcile loop at 90s, requires at least 30s of post-margin budget to start, and sends an explicit continuation immediately when the round is partial. The worker Lambda memory is raised from 1024MB to 2048MB to improve CPU/network headroom for large SQLite checkpoints.
+
+**Verification:** `npx vitest run lambda/kb-keyword-sync-worker/handler.test.ts` passed (8/8), `npx vitest run app/lib/kb-keyword-index.test.ts lambda/kb-keyword-sync-worker/handler.test.ts` passed (36/36), `npx tsc --noEmit` clean, `terraform -chdir=infra/terraform fmt -check kb_keyword_sync.tf` clean, and `npm run build` from `lambda/kb-keyword-sync-worker` clean.
